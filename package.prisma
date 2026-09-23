@@ -18,14 +18,14 @@ def package "luce-fonts" {
     }
 
     def native "macos" {
-        list frameworks = ["CoreText", "CoreGraphics", "CoreFoundation"]
+        str[] frameworks = ["CoreText", "CoreGraphics", "CoreFoundation"]
     }
 
     def native "windows" {
-        list libraries = ["gdi32"]
+        str[] libraries = ["gdi32"]
     }
 
     def native "linux" {
-        list libraries = ["cairo"]
+        str[] libraries = ["cairo"]
     }
 }
