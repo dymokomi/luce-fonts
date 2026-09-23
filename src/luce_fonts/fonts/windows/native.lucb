@@ -1,0 +1,138 @@
+#==============================================================================================
+#
+#   native - The Windows (GDI) font backend
+#
+#   DESCRIPTION:
+#       GDI's outline rasterizer returns 65-level grayscale coverage, independent of
+#       ClearType settings. Native row padding and glyph bearings stay in this adapter.
+#
+#==============================================================================================
+
+extern struct FontLog:
+    height: i32
+    width: i32
+    escapement: i32
+    orientation: i32
+    weight: i32
+    italic: u8
+    underline: u8
+    strike: u8
+    charset: u8
+    precision: u8
+    clipping: u8
+    quality: u8
+    pitch: u8
+    family: u16[32]
+
+extern struct FontMetrics:
+    height: i32
+    ascent: i32
+    descent: i32
+    internal: i32
+    external: i32
+    average: i32
+    maximum: i32
+    weight: i32
+    overhang: i32
+    aspect_x: i32
+    aspect_y: i32
+    first: u16
+    last: u16
+    default_char: u16
+    break_char: u16
+    italic: u8
+    underlined: u8
+    struck: u8
+    pitch: u8
+    charset: u8
+
+extern struct GlyphMetrics:
+    width: u32
+    height: u32
+    x: i32
+    y: i32
+    advance_x: i16
+    advance_y: i16
+
+extern struct FontMatrix:
+    xx: u32 = 65536
+    xy: u32
+    yx: u32
+    yy: u32 = 65536
+
+extern func CreateCompatibleDC(dc: void*?) -> void*?
+extern func DeleteDC(dc: void*) -> i32
+extern func CreateFontIndirectW(font: const FontLog*) -> void*?
+extern func SelectObject(dc: void*, object: void*) -> void*?
+extern func DeleteObject(object: void*) -> i32
+extern func GetObjectW(object: void*, size: i32, output: void*) -> i32
+extern func GetTextMetricsW(dc: void*, metrics: FontMetrics*) -> i32
+extern func GetGlyphOutlineW(dc: void*, character: u32, glyph_format: u32, metrics: GlyphMetrics*, size: u32, output: void*?, matrix: const FontMatrix*) -> u32
+
+func win_face(size: f64, family: str) -> NativeFace!:
+    let text = try family_bytes("Consolas" if family.length == 0 else family)
+    defer free(text)
+    let wide = try windows_text.wide((c.str)text.data, failed)
+    defer free(wide)
+    if wide.length > 32:
+        error(failed, "Windows font families support at most 31 UTF-16 units")
+    var description = FontLog(height = -(i32)math.round(size * 64.0), weight = 400, charset = 1, precision = 4, quality = 4, pitch = 49)
+    for index in 0..<wide.length:
+        description.family[index] = wide[index]
+    let font = CreateFontIndirectW(&description) else error(failed, "could not load the font family")
+    errdefer discard(DeleteObject(font))
+    let dc = CreateCompatibleDC(none) else error(failed, "could not create a font context")
+    errdefer discard(DeleteDC(dc))
+    discard(SelectObject(dc, font) else error(failed, "could not select the font"))
+    var metrics: FontMetrics
+    if GetTextMetricsW(dc, &metrics) == 0 or (metrics.pitch & 1) != 0:
+        error(failed, "the requested font must be monospace")
+    return NativeFace(dc, font, (f64)metrics.average / 64.0, (f64)metrics.ascent / 64.0, (f64)metrics.descent / 64.0)
+
+func win_close(dc: void*, font: void*?):
+    discard(DeleteDC(dc))
+    if let object = font:
+        discard(DeleteObject(object))
+
+func win_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
+    let dc = face.native else error(failed, "the font is closed")
+    let original = face.auxiliary else error(failed, "the font is closed")
+    var description: FontLog
+    if GetObjectW(original, (i32)sizeof(FontLog), &description) != (i32)sizeof(FontLog):
+        error(failed, "could not read font attributes")
+    description.height = -(i32)math.round(face.size * scale)
+    let font = CreateFontIndirectW(&description) else error(failed, "could not scale the font")
+    defer discard(DeleteObject(font))
+    discard(SelectObject(dc, font) else error(failed, "could not select the scaled font"))
+    defer discard(SelectObject(dc, original))
+    var matrix = FontMatrix()
+    var offset: usize = 0
+    var index: usize = 0
+    while offset < text.length:
+        let decoded = utf8.decode(text.bytes, offset) else trap("validated text changed")
+        offset += decoded.width
+        var metrics: GlyphMetrics
+        let character = (u32)decoded.scalar if (u32)decoded.scalar <= 65535 else (u32)65533
+        let length = GetGlyphOutlineW(dc, character, 6, &metrics, 0, none, &matrix)
+        if length == 4294967295 or length > 1048576:
+            error(failed, "could not rasterize the font glyph")
+        if length > 0:
+            let native = try alloc u8[(usize)length] in memory.heap
+            defer free(native) in memory.heap
+            if GetGlyphOutlineW(dc, character, 6, &metrics, length, native.data, &matrix) == 4294967295:
+                error(failed, "could not read font coverage")
+            let stride = ((usize)metrics.width + 3) // 4 * 4
+            if stride * (usize)metrics.height > native.length:
+                error(failed, "native glyph dimensions exceed its buffer")
+            let left = 2 + (i64)math.round((f64)index * face.advance * scale) + (i64)metrics.x
+            let top = 2 + (i64)math.ceil(face.ascent * scale) - (i64)metrics.y
+            for row in 0..<(usize)metrics.height:
+                for column in 0..<(usize)metrics.width:
+                    let x = left + (i64)column
+                    let y = top + (i64)row
+                    if x >= 0 and y >= 0 and x < (i64)bitmap.width and y < (i64)bitmap.height:
+                        let coverage = (u8)(((u32)native[row * stride + column] * 255 + 32) // 64)
+                        let at = (usize)y * (usize)bitmap.width + (usize)x
+                        if coverage > bitmap.pixels[at]:
+                            bitmap.pixels[at] = coverage
+        index += 1

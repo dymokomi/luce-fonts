@@ -1,0 +1,69 @@
+name: Correctness
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04]
+    env:
+      LUCE_TEST_GPU: optional
+      LUCE_TEST_WINDOW: optional
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: luce-fonts
+      - name: Read compiler and dependency pins
+        id: pins
+        run: |
+          echo "base=$(cat luce-fonts/bootstrap/BASE)" >> "$GITHUB_OUTPUT"
+          echo "std=$(cat luce-fonts/bootstrap/STD)" >> "$GITHUB_OUTPUT"
+          echo "window=$(cat luce-fonts/bootstrap/WINDOW)" >> "$GITHUB_OUTPUT"
+          echo "gpu=$(cat luce-fonts/bootstrap/GPU)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-base
+          ref: ${{ steps.pins.outputs.base }}
+          path: luce-base
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-std
+          ref: ${{ steps.pins.outputs.std }}
+          path: luce-std
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-window
+          ref: ${{ steps.pins.outputs.window }}
+          path: luce-window
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-gpu
+          ref: ${{ steps.pins.outputs.gpu }}
+          path: luce-gpu
+      - name: Install Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcairo2-dev fonts-dejavu-core
+      - name: Select Clang
+        run: |
+          mkdir -p "$RUNNER_TEMP/luce-bin"
+          ln -s "$(command -v clang)" "$RUNNER_TEMP/luce-bin/cc"
+          echo "$RUNNER_TEMP/luce-bin" >> "$GITHUB_PATH"
+      - name: Build the compiler
+        working-directory: luce-base
+        run: ./build.sh
+      - name: Package gate
+        working-directory: luce-fonts
+        run: ./test.sh
+      - name: Retain diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: luce-fonts-${{ matrix.runner }}-${{ github.sha }}
+          path: |
+            luce-fonts/build/*.log
+            luce-fonts/build/failures/
+          if-no-files-found: ignore

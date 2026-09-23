@@ -1,0 +1,20 @@
+#prisma 4.0
+def package "fonts-test" {
+    def dependency "luce-fonts" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../../.."
+    }
+
+    def dependency "luce-gpu" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../../../../luce-gpu"
+    }
+
+    def dependency "luce-window" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../../../../luce-window"
+    }
+}

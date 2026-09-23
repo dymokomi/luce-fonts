@@ -1,0 +1,157 @@
+#==============================================================================================
+#
+#   fonts - Native font resources and grayscale rasterization
+#
+#   DESCRIPTION:
+#       Native font resources and grayscale rasterization. UI typography and caches belong
+#       to the UI package; this module owns only the operating-system boundary.
+#
+#==============================================================================================
+
+import c
+import interop
+import math
+import memory
+import platform
+import strings
+import thread
+import utf8
+import windows_text
+## A font operation failed, or its arguments were rejected.
+pub let failed: ErrorCode = ErrorCode.package(118)
+
+# mark: The image and the face ================================================================
+
+## A top-down tightly packed coverage image. Copies borrow; close one owner.
+pub struct Bitmap:
+    ## The coverage bytes, `width*height`, top-down and tightly packed.
+    pub var pixels: u8[]
+    ## The image width in pixels.
+    pub var width: u32
+    ## The image height in pixels.
+    pub var height: u32
+    ## The blank margin the rasterizer reserves around the text, in image pixels.
+    pub var padding: f64
+
+    ## Release the pixels and reset to an empty bitmap.
+    pub mutating func close():
+        if self.pixels.length > 0:
+            free(self.pixels) in memory.heap
+        self = Bitmap()
+
+## An installed monospace face, in logical points. An empty family selects Menlo
+## on macOS, Consolas on Windows and the fontconfig monospace family on Linux.
+## Loading and rasterization require the UI thread. Copies borrow one native owner.
+pub struct Face:
+    var native: void*?
+    var auxiliary: void*?
+    ## The face's size in logical points.
+    pub let size: f64
+    ## The width of one monospace cell, in points.
+    pub let advance: f64
+    ## The ascent above the baseline, in points.
+    pub let ascent: f64
+    ## The descent below the baseline, in points.
+    pub let descent: f64
+
+    ## Load the installed monospace face at `size` points (8..64); an empty `family` is the
+    ## platform default. Requires the UI thread.
+    pub func init(size: f64 = 14.0, family: str = "") -> !:
+        try check_thread()
+        if not (size >= 8.0 and size <= 64.0):
+            error(failed, "font size must be finite and in 8..64 points")
+        if family.length > 255 or not utf8.valid(family.bytes):
+            error(failed, "font family must be UTF-8 within 255 bytes")
+        for byte in family.bytes:
+            if byte == 0:
+                error(failed, "font family cannot contain NUL")
+        let loaded = try load_face(size, family)
+        self.native = loaded.native
+        self.auxiliary = loaded.auxiliary
+        self.size = size
+        self.advance = loaded.advance
+        self.ascent = loaded.ascent
+        self.descent = loaded.descent
+
+    ## The rendered width of `text` in points: one cell advance per scalar.
+    pub func measure(text: str) -> f64!:
+        if self.native == none:
+            error(failed, "the font is closed")
+        return (f64)(try scalar_count(text)) * self.advance
+
+    ## One scalar per monospace cell, with native glyph fallback where available.
+    ## This is code-grid text, not paragraph shaping or bidirectional layout.
+    pub func rasterize(text: str, scale: f64 = 1.0) -> Bitmap!:
+        try check_thread()
+        let width = try self.measure(text)
+        if not (scale >= 0.5 and scale <= 4.0):
+            error(failed, "font raster scale must be finite and in 0.5..4")
+        let columns = (usize)math.ceil(width * scale) + 4
+        let rows = (usize)math.ceil((self.ascent + self.descent) * scale) + 4
+        if columns > 16384 or rows > 1024 or columns * rows > 4194304:
+            error(failed, "rasterized text exceeds the 4 MiB image limit")
+        let pixels = try new u8[columns * rows] in memory.heap
+        var bitmap = Bitmap(pixels, (u32)columns, (u32)rows, 2.0 / scale)
+        errdefer bitmap.close()
+        if platform.macos:
+            try mac_raster(self, text, scale, &bitmap)
+        elif platform.windows:
+            try win_raster(self, text, scale, &bitmap)
+        elif platform.linux:
+            try linux_raster(self, text, scale, &bitmap)
+        else:
+            error(failed, "native fonts are unavailable on this target")
+        return bitmap
+
+    ## Release the native face.
+    pub mutating func close():
+        if let native = self.native:
+            if platform.macos:
+                CFRelease(native)
+            elif platform.windows:
+                win_close(native, self.auxiliary)
+            elif platform.linux:
+                cairo_scaled_font_destroy(native)
+            self.native = none
+            self.auxiliary = none
+
+func check_thread() -> !:
+    if not thread.is_main():
+        error(interop.wrong_thread, "font operations require the UI thread")
+
+func scalar_count(text: str) -> usize!:
+    if text.length > 4096:
+        error(failed, "a text run supports at most 4096 UTF-8 bytes")
+    var offset: usize = 0
+    var count: usize = 0
+    while offset < text.length:
+        let decoded = utf8.decode(text.bytes, offset) else error(failed, "text must be valid UTF-8")
+        if (u32)decoded.scalar == 0 or (u32)decoded.scalar == 10 or (u32)decoded.scalar == 13 or (u32)decoded.scalar == 9:
+            error(failed, "text runs cannot contain NUL, tabs or line breaks")
+        offset += decoded.width
+        count += 1
+    if count > 1024:
+        error(failed, "a text run supports at most 1024 scalars")
+    return count
+
+struct NativeFace:
+    var native: void*?
+    var auxiliary: void*?
+    var advance: f64
+    var ascent: f64
+    var descent: f64
+
+func load_face(size: f64, family: str) -> NativeFace!:
+    if platform.macos:
+        return try mac_face(size, family)
+    if platform.windows:
+        return try win_face(size, family)
+    if platform.linux:
+        return try linux_face(size, family)
+    error(failed, "native fonts are unavailable on this target")
+
+func family_bytes(text: str) -> u8[]!:
+    let bytes = try alloc u8[text.length + 1]
+    memory.copy(bytes, text.bytes, text.length)
+    bytes[text.length] = 0
+    return bytes

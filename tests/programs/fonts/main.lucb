@@ -1,0 +1,68 @@
+## Native font metrics, grayscale coverage and the copied GPU mask contract.
+import fonts
+import gpu
+import memory
+import platform
+import window
+
+pub func main(arguments: str[]) -> i32!:
+    var face = try fonts.Face()
+    defer face.close()
+    assert(face.size == 14.0 and face.advance > 0.0 and face.ascent > 0.0 and face.descent >= 0.0)
+    assert(try face.measure("iii") == try face.measure("WWW"))
+    assert(try face.measure("é—") == face.advance * 2.0)
+    var blank = try face.rasterize("   ", 2.0)
+    defer blank.close()
+    for pixel in blank.pixels:
+        assert(pixel == 0)
+    for scale in [1.0, 2.0]:
+        var raster = try face.rasterize("Ag0 é—", scale)
+        defer raster.close()
+        assert(raster.pixels.length == (usize)raster.width * (usize)raster.height)
+        var visible: usize = 0
+        var gray: usize = 0
+        for pixel in raster.pixels:
+            if pixel > 0:
+                visible += 1
+            if pixel > 0 and pixel < 255:
+                gray += 1
+        assert(visible > 20 and gray > 10)
+        assert(visible < raster.pixels.length // 2)
+        # Padding must be transparent, so adjacent runs cannot paint rectangles.
+        for column in 0..<(usize)raster.width:
+            assert(raster.pixels[column] == 0)
+            assert(raster.pixels[((usize)raster.height - 1) * (usize)raster.width + column] == 0)
+    var invalid = false
+    var bad: fonts.Face? = fonts.Face(size = 0.0) catch failure:
+        assert(failure.code == fonts.failed)
+        invalid = true
+        recover none
+    assert(invalid)
+    if let loaded = bad:
+        var unexpected = loaded
+        unexpected.close()
+    var invalid_bytes: u8[1] = [255]
+    var malformed = false
+    discard(face.measure((str)invalid_bytes[..<1])) catch failure:
+        assert(failure.code == fonts.failed)
+        malformed = true
+    assert(malformed)
+    var frame = try gpu.Frame(window.Size(100.0, 80.0, 200.0, 160.0, 2.0))
+    defer frame.close()
+    let target = try frame.target()
+    defer target.release()
+    var coverage: u8[4] = [0, 85, 170, 255]
+    try target.get().mask(coverage, 4, 1, gpu.Rect(10.0, 10.0, 40.0, 10.0), gpu.Color(1.0, 1.0, 1.0))
+    coverage[0] = 255
+    var rejected = false
+    target.get().mask(coverage, 3, 1, gpu.Rect(10.0, 10.0, 40.0, 10.0), gpu.Color()) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        rejected = true
+    assert(rejected)
+    frame.close()
+    var expired = false
+    target.get().mask(coverage, 4, 1, gpu.Rect(10.0, 10.0, 40.0, 10.0), gpu.Color()) catch failure:
+        expired = true
+    assert(expired)
+    print("ok native monospace metrics, grayscale glyphs and scoped GPU coverage")
+    return 0

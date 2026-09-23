@@ -1,0 +1,31 @@
+#prisma 4.0
+def package "luce-fonts" {
+    str owner = "dymokomi"
+    str version = "0.1.0"
+    str kind = "package"
+    str language = "luce-base"
+    str description = "Native font rasterisation for Luce: CoreText on macOS, GDI on Windows, cairo on Linux."
+    str readme = "README.md"
+
+    def export "fonts" {
+        str module = "luce_fonts.fonts"
+    }
+
+    def dependency "luce-std" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../luce-std"
+    }
+
+    def native "macos" {
+        list frameworks = ["CoreText", "CoreGraphics", "CoreFoundation"]
+    }
+
+    def native "windows" {
+        list libraries = ["gdi32"]
+    }
+
+    def native "linux" {
+        list libraries = ["cairo"]
+    }
+}

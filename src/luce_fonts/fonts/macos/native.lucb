@@ -1,0 +1,96 @@
+#==============================================================================================
+#
+#   native - The macOS (CoreText/CoreGraphics) font backend
+#
+#   DESCRIPTION:
+#       CoreText resolves installed faces and fallback glyphs. CoreGraphics writes
+#       grayscale alpha at backing resolution, with LCD color fringes disabled.
+#
+#==============================================================================================
+
+extern struct FontPoint:
+    x: f64
+    y: f64
+
+extern struct FontSize:
+    width: f64
+    height: f64
+
+extern func CFStringCreateWithBytes(allocator: void*?, bytes: const u8*, length: i64, encoding: u32, external: bool) -> void*?
+extern func CFRelease(object: void*)
+extern func CTFontCreateWithName(name: void*, size: f64, matrix: void*?) -> void*?
+extern func CTFontCreateCopyWithAttributes(font: void*, size: f64, matrix: void*?, attributes: void*?) -> void*?
+extern func CTFontGetAscent(font: void*) -> f64
+extern func CTFontGetDescent(font: void*) -> f64
+extern func CTFontGetSymbolicTraits(font: void*) -> u32
+extern func CTFontGetGlyphsForCharacters(font: void*, characters: const u16*, glyphs: u16*, count: i64) -> bool
+extern func CTFontGetAdvancesForGlyphs(font: void*, orientation: u32, glyphs: const u16*, advances: FontSize*?, count: i64) -> f64
+
+extern struct FontRange:
+    location: i64
+    length: i64
+
+extern func CTFontCreateForString(font: void*, text: void*, range: FontRange) -> void*?
+extern func CTFontDrawGlyphs(font: void*, glyphs: const u16*, positions: const FontPoint*, count: i64, context: void*)
+extern func CGBitmapContextCreate(data: void*, width: usize, height: usize, bits: usize, stride: usize, color_space: void*?, info: u32) -> void*?
+extern func CGContextRelease(context: void*)
+extern func CGContextSetShouldAntialias(context: void*, enabled: bool)
+extern func CGContextSetShouldSmoothFonts(context: void*, enabled: bool)
+extern func CGContextSetGrayFillColor(context: void*, gray: f64, alpha: f64)
+
+func mac_string(text: str) -> void*!:
+    return CFStringCreateWithBytes(none, text.bytes.data, (i64)text.length, 0x08000100, false) else error(failed, "could not create native font text")
+
+func mac_face(size: f64, family: str) -> NativeFace!:
+    let name = try mac_string("Menlo" if family.length == 0 else family)
+    defer CFRelease(name)
+    let native = CTFontCreateWithName(name, size, none) else error(failed, "could not load the font family")
+    errdefer CFRelease(native)
+    if (CTFontGetSymbolicTraits(native) & 1024) == 0:
+        error(failed, "the requested font must be monospace")
+    var character: u16 = 77
+    var glyph: u16 = 0
+    discard(CTFontGetGlyphsForCharacters(native, &character, &glyph, 1))
+    let advance = CTFontGetAdvancesForGlyphs(native, 0, &glyph, none, 1)
+    return NativeFace(native, none, advance, CTFontGetAscent(native), CTFontGetDescent(native))
+
+func mac_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
+    let font = CTFontCreateCopyWithAttributes(face.native else error(failed, "the font is closed"), face.size * scale, none, none) else error(failed, "could not scale the font")
+    defer CFRelease(font)
+    # kCGImageAlphaOnly: the rasterizer produces coverage, not display colors.
+    let context = CGBitmapContextCreate(bitmap.pixels.data, (usize)bitmap.width, (usize)bitmap.height, 8, (usize)bitmap.width, none, 7) else error(failed, "could not create a font raster context")
+    defer CGContextRelease(context)
+    CGContextSetShouldAntialias(context, true)
+    CGContextSetShouldSmoothFonts(context, false)
+    CGContextSetGrayFillColor(context, 1.0, 1.0)
+    var offset: usize = 0
+    var index: usize = 0
+    while offset < text.length:
+        let start = offset
+        let decoded = utf8.decode(text.bytes, offset) else trap("validated text changed")
+        offset += decoded.width
+        var characters: u16[2]
+        var count: i64 = 1
+        let scalar = (u32)decoded.scalar
+        if scalar > 65535:
+            characters[0] = (u16)(55296 + ((scalar - 65536) >> 10))
+            characters[1] = (u16)(56320 + ((scalar - 65536) & 1023))
+            count = 2
+        else:
+            characters[0] = (u16)scalar
+        var glyphs: u16[2]
+        var chosen = font
+        var fallback: void*? = none
+        if not CTFontGetGlyphsForCharacters(font, &characters[0], &glyphs[0], count):
+            let string = try mac_string((str)text.bytes[start..<offset])
+            defer CFRelease(string)
+            fallback = CTFontCreateForString(font, string, FontRange(0, count))
+            if let replacement = fallback:
+                chosen = replacement
+                discard(CTFontGetGlyphsForCharacters(chosen, &characters[0], &glyphs[0], count))
+        var position = FontPoint(2.0 + (f64)index * face.advance * scale,
+                                 (f64)bitmap.height - 2.0 - face.ascent * scale)
+        CTFontDrawGlyphs(chosen, &glyphs[0], &position, 1, context)
+        if let replacement = fallback:
+            CFRelease(replacement)
+        index += 1
