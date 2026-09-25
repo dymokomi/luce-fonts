@@ -244,7 +244,8 @@ func win_draw_run(face: const TypeFace*, text: str, x: f64, baseline: f64, bitma
 func win_family_found(font: const EnumLogFont*, metrics: const void*, kind: u32, parameter: isize) -> i32:
     discard(metrics)
     # Outline fonts only: raster ones ("8514oem") cannot be set at any size.
-    if (kind & 1) == 0:
+    # Symbol fonts (Wingdings, "HoloLens MDL2 Assets") are icons, not type.
+    if (kind & 1) == 0 and font.font.charset != 2:
         win_add_name(font.font.family[..<32], parameter)
     return 1
 
