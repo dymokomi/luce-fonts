@@ -6,6 +6,7 @@ import platform
 import window
 
 pub func main(arguments: str[]) -> i32!:
+    try proportional()
     var face = try fonts.Face()
     defer face.close()
     assert(face.size == 14.0 and face.advance > 0.0 and face.ascent > 0.0 and face.descent >= 0.0)
@@ -66,3 +67,43 @@ pub func main(arguments: str[]) -> i32!:
     assert(expired)
     print("ok native monospace metrics, grayscale glyphs and scoped GPU coverage")
     return 0
+
+## Proportional type: families and styles listed, a face that is not
+## monospace, text broken into lines in a box, aligned, tracked and led.
+func proportional() -> !:
+    var families = try fonts.families()
+    defer families.close()
+    assert(families.length() > 0)
+    let family = "Helvetica" if platform.macos else ("Arial" if platform.windows else "Sans")
+    if platform.macos or platform.windows:
+        assert(families.contains(family))
+    var styles = try fonts.styles(family)
+    defer styles.close()
+    assert(styles.length() > 0)
+    var face = try fonts.TypeFace(family, "Regular", 40.0)
+    defer face.close()
+    assert(face.ascent > 20.0 and face.descent > 0.0 and face.line_height() >= face.ascent + face.descent)
+    assert((try face.measure("iiii")) < (try face.measure("WWWW")))
+    var point = try fonts.set_text(&face, "Hello\nworld", fonts.Setting())
+    defer point.close()
+    let hello = try face.measure("Hello")
+    let world = try face.measure("world")
+    assert(point.lines == 2 and point.width == (hello if hello > world else world))
+    var visible: usize = 0
+    for pixel in point.bitmap.pixels:
+        if pixel > 128:
+            visible += 1
+    assert(visible > 200)
+    # In a box 200 wide the words wrap; tracking widens a line; leading spaces the lines.
+    var boxed = try fonts.set_text(&face, "The quick brown fox jumps over the lazy dog", fonts.Setting(width = 200.0, alignment = 1))
+    defer boxed.close()
+    assert(boxed.lines >= 3 and boxed.width == 200.0)
+    var tracked = try fonts.set_text(&face, "Hello", fonts.Setting(tracking = 200.0))
+    defer tracked.close()
+    assert(tracked.width > hello + 30.0)
+    var led = try fonts.set_text(&face, "a\nb", fonts.Setting(leading = 100.0))
+    defer led.close()
+    assert(led.height > 100.0 + face.ascent)
+    var justified = try fonts.set_text(&face, "one two three four five six", fonts.Setting(width = 260.0, alignment = 3))
+    defer justified.close()
+    assert(justified.lines >= 2)

@@ -94,3 +94,117 @@ func mac_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
         if let replacement = fallback:
             CFRelease(replacement)
         index += 1
+
+# mark: Proportional type ======================================================================
+
+extern var kCTFontFamilyNameAttribute: void*
+extern var kCTFontStyleNameAttribute: void*
+extern var kCTFontAttributeName: void*
+extern var kCTForegroundColorFromContextAttributeName: void*
+extern var kCFBooleanTrue: void*
+## CoreFoundation's retaining callbacks are structs; only their addresses are
+## needed, so they are declared as their first byte.
+extern var kCFTypeDictionaryKeyCallBacks: u8
+extern var kCFTypeDictionaryValueCallBacks: u8
+
+extern func CFDictionaryCreateMutable(allocator: void*?, capacity: i64, keys: void*?, values: void*?) -> void*?
+extern func CFDictionarySetValue(dictionary: void*, key: void*, value: void*)
+extern func CFArrayGetCount(array: void*) -> i64
+extern func CFArrayGetValueAtIndex(array: void*, index: i64) -> void*?
+extern func CFStringGetCString(string: void*, buffer: u8*, size: i64, encoding: u32) -> bool
+extern func CFAttributedStringCreate(allocator: void*?, string: void*, attributes: void*) -> void*?
+extern func CTFontDescriptorCreateWithAttributes(attributes: void*) -> void*?
+extern func CTFontDescriptorCreateMatchingFontDescriptors(descriptor: void*, mandatory: void*?) -> void*?
+extern func CTFontDescriptorCopyAttribute(descriptor: void*, attribute: void*) -> void*?
+extern func CTFontCreateWithFontDescriptor(descriptor: void*, size: f64, matrix: void*?) -> void*?
+extern func CTFontGetLeading(font: void*) -> f64
+extern func CTFontManagerCopyAvailableFontFamilyNames() -> void*?
+extern func CTLineCreateWithAttributedString(string: void*) -> void*?
+extern func CTLineGetTypographicBounds(line: void*, ascent: f64*?, descent: f64*?, leading: f64*?) -> f64
+extern func CTLineDraw(line: void*, context: void*)
+extern func CGContextSetTextPosition(context: void*, x: f64, y: f64)
+
+## A dictionary that retains what it holds, as CoreText expects.
+func mac_dictionary() -> void*!:
+    return CFDictionaryCreateMutable(none, 2, (void*)&kCFTypeDictionaryKeyCallBacks, (void*)&kCFTypeDictionaryValueCallBacks) else error(failed, "could not describe the font")
+
+## A descriptor naming `family` and, when given, `style`.
+func mac_descriptor(family: str, style: str) -> void*!:
+    let attributes = try mac_dictionary()
+    defer CFRelease(attributes)
+    let family_name = try mac_string(family)
+    defer CFRelease(family_name)
+    CFDictionarySetValue(attributes, kCTFontFamilyNameAttribute, family_name)
+    var style_name: void*? = none
+    if style.length > 0:
+        let named = try mac_string(style)
+        style_name = named
+        CFDictionarySetValue(attributes, kCTFontStyleNameAttribute, named)
+    let descriptor = CTFontDescriptorCreateWithAttributes(attributes)
+    if let named = style_name:
+        CFRelease(named)
+    return descriptor else error(failed, "could not describe the font")
+
+func mac_type(family: str, style: str, size: f64) -> LoadedType!:
+    let descriptor = try mac_descriptor(family, style)
+    defer CFRelease(descriptor)
+    let font = CTFontCreateWithFontDescriptor(descriptor, size, none) else error(failed, "could not load the font")
+    return LoadedType(native = font, auxiliary = none, ascent = CTFontGetAscent(font), descent = CTFontGetDescent(font), gap = CTFontGetLeading(font))
+
+## A CoreText line of `text` in `face`, its color the context's.
+func mac_line(face: const TypeFace*, text: str) -> void*!:
+    let font = face.native else error(failed, "the face is closed")
+    let string = try mac_string(text)
+    defer CFRelease(string)
+    let attributes = try mac_dictionary()
+    defer CFRelease(attributes)
+    CFDictionarySetValue(attributes, kCTFontAttributeName, font)
+    CFDictionarySetValue(attributes, kCTForegroundColorFromContextAttributeName, kCFBooleanTrue)
+    let attributed = CFAttributedStringCreate(none, string, attributes) else error(failed, "could not set the text")
+    defer CFRelease(attributed)
+    return CTLineCreateWithAttributedString(attributed) else error(failed, "could not lay out the text")
+
+func mac_measure_run(face: const TypeFace*, text: str) -> f64!:
+    let line = try mac_line(face, text)
+    defer CFRelease(line)
+    return CTLineGetTypographicBounds(line, none, none, none)
+
+## The run drawn over the coverage already there (CoreGraphics composites).
+func mac_draw_run(face: const TypeFace*, text: str, x: f64, baseline: f64, bitmap: Bitmap*) -> !:
+    let line = try mac_line(face, text)
+    defer CFRelease(line)
+    let context = CGBitmapContextCreate(bitmap.pixels.data, (usize)bitmap.width, (usize)bitmap.height, 8, (usize)bitmap.width, none, 7) else error(failed, "could not create a font raster context")
+    defer CGContextRelease(context)
+    CGContextSetShouldAntialias(context, true)
+    CGContextSetShouldSmoothFonts(context, false)
+    CGContextSetGrayFillColor(context, 1.0, 1.0)
+    # CoreGraphics counts up from the bottom row.
+    CGContextSetTextPosition(context, x, (f64)bitmap.height - baseline)
+    CTLineDraw(line, context)
+
+## The CFString `string` added to `names`.
+func mac_add_name(string: void*, names: Names*) -> !:
+    var buffer: u8[512]
+    if CFStringGetCString(string, &buffer[0], 512, 0x08000100):
+        var length: usize = 0
+        while length < 512 and buffer[length] != 0:
+            length += 1
+        try names.add((str)buffer[..<length])
+
+func mac_families(names: Names*) -> !:
+    let list = CTFontManagerCopyAvailableFontFamilyNames() else error(failed, "could not list the fonts")
+    defer CFRelease(list)
+    for index in 0..<CFArrayGetCount(list):
+        let name = CFArrayGetValueAtIndex(list, index) else continue
+        try mac_add_name(name, names)
+
+func mac_styles(family: str, names: Names*) -> !:
+    let descriptor = try mac_descriptor(family, "")
+    defer CFRelease(descriptor)
+    let matches = CTFontDescriptorCreateMatchingFontDescriptors(descriptor, none) else return
+    defer CFRelease(matches)
+    for index in 0..<CFArrayGetCount(matches):
+        let face = CFArrayGetValueAtIndex(matches, index) else continue
+        let style = CTFontDescriptorCopyAttribute(face, kCTFontStyleNameAttribute) else continue
+        defer CFRelease(style)
+        try mac_add_name(style, names)

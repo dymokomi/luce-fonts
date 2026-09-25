@@ -109,3 +109,69 @@ func linux_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
     let stride = (usize)cairo_image_surface_get_stride(surface)
     for row in 0..<(usize)bitmap.height:
         memory.copy(bitmap.pixels[row * (usize)bitmap.width..], u8[](source + row * stride, (usize)bitmap.width), (usize)bitmap.width)
+
+# mark: Proportional type ======================================================================
+
+extern func cairo_get_font_face(context: void*) -> void*
+
+func linux_type(family: str, style: str, size: f64) -> LoadedType!:
+    let name = try family_bytes(family)
+    defer free(name)
+    let surface = cairo_image_surface_create(2, 1, 1)
+    defer cairo_surface_destroy(surface)
+    let context = cairo_create(surface)
+    errdefer cairo_destroy(context)
+    linux_options(context)
+    let italic = holds(style, "italic") or holds(style, "oblique")
+    cairo_select_font_face(context, (c.str)name.data, 1 if italic else 0, 1 if holds(style, "bold") else 0)
+    cairo_set_font_size(context, size)
+    var metrics: CairoFontMetrics
+    cairo_font_extents(context, &metrics)
+    if cairo_status(context) != 0:
+        error(failed, "could not load the font")
+    return LoadedType(native = context, auxiliary = none, ascent = metrics.ascent, descent = metrics.descent,
+                      gap = math.max(0.0, metrics.height - metrics.ascent - metrics.descent))
+
+func linux_measure_run(face: const TypeFace*, text: str) -> f64!:
+    let context = face.native else error(failed, "the face is closed")
+    let bytes = try family_bytes(text)
+    defer free(bytes)
+    var extents: CairoTextMetrics
+    cairo_text_extents(context, (c.str)bytes.data, &extents)
+    return extents.advance_x
+
+func linux_draw_run(face: const TypeFace*, text: str, x: f64, baseline: f64, bitmap: Bitmap*) -> !:
+    let source_context = face.native else error(failed, "the face is closed")
+    let bytes = try family_bytes(text)
+    defer free(bytes)
+    let surface = cairo_image_surface_create(2, (i32)bitmap.width, (i32)bitmap.height)
+    defer cairo_surface_destroy(surface)
+    if cairo_surface_status(surface) != 0:
+        error(failed, "could not allocate font raster storage")
+    let context = cairo_create(surface)
+    defer cairo_destroy(context)
+    linux_options(context)
+    cairo_set_font_face(context, cairo_get_font_face(source_context))
+    cairo_set_font_size(context, face.size)
+    cairo_set_source_rgba(context, 1.0, 1.0, 1.0, 1.0)
+    cairo_move_to(context, x, baseline)
+    cairo_show_text(context, (c.str)bytes.data)
+    cairo_surface_flush(surface)
+    let source = cairo_image_surface_get_data(surface)
+    let stride = (usize)cairo_image_surface_get_stride(surface)
+    # Over what is there: the larger coverage wins.
+    for row in 0..<(usize)bitmap.height:
+        for column in 0..<(usize)bitmap.width:
+            let value = source[row * stride + column]
+            let at = row * (usize)bitmap.width + column
+            if value > bitmap.pixels[at]:
+                bitmap.pixels[at] = value
+
+## Without fontconfig's list, the families every desktop resolves.
+func linux_families(names: Names*) -> !:
+    for name in ["Sans", "Serif", "Monospace"]:
+        try names.add(name)
+
+func linux_styles(names: Names*) -> !:
+    for name in ["Regular", "Bold", "Italic", "Bold Italic"]:
+        try names.add(name)

@@ -1,0 +1,452 @@
+#==============================================================================================
+#
+#   type - Proportional type set in paragraphs
+#
+#   DESCRIPTION:
+#       Installed families and their styles, a face loaded by family, style and size in
+#       pixels, and text set with it: lines broken at newlines and, in a box of a given
+#       width, between words; aligned left, center, right or justified; tracked and led.
+#       The platform backends give three things — load a face, measure a run, draw a run
+#       at a baseline — and the paragraph is laid out here, alike everywhere.
+#
+#==============================================================================================
+
+# mark: Names ==================================================================================
+
+## A list of names — font families or a family's styles — owned together.
+pub struct Names:
+    var bytes: u8[]
+    var used: usize
+    var starts: usize[]
+    var count: usize
+
+    pub static func create() -> Names!:
+        return Names(bytes = try alloc u8[4096] in memory.heap, used = 0, starts = try alloc usize[64] in memory.heap, count = 0)
+
+    ## How many names.
+    pub func length() -> usize:
+        return self.count
+
+    ## Name `index`, borrowed from the list.
+    pub func at(index: usize) -> str!:
+        if index >= self.count:
+            error(failed, "no such name")
+        let start = self.starts[index]
+        let end = self.starts[index + 1] if index + 1 < self.count else self.used
+        return (str)self.bytes[start..<end]
+
+    ## Whether `name` is among them.
+    pub func contains(name: str) -> bool:
+        for index in 0..<self.count:
+            let found = self.at(index) catch _:
+                return false
+            if found == name:
+                return true
+        return false
+
+    ## Add `name` unless it is there already, keeping the list sorted.
+    mutating func add(name: str) -> !:
+        if name.length == 0 or self.contains(name):
+            return
+        if self.used + name.length > self.bytes.length:
+            var room = self.bytes.length * 2
+            while room < self.used + name.length:
+                room *= 2
+            let grown = try alloc u8[room] in memory.heap
+            memory.copy(grown, self.bytes, self.used)
+            free(self.bytes) in memory.heap
+            self.bytes = grown
+        if self.count == self.starts.length:
+            let grown = try alloc usize[self.starts.length * 2] in memory.heap
+            memory.copy(grown, self.starts, self.count)
+            free(self.starts) in memory.heap
+            self.starts = grown
+        # Insertion keeps them in order: find the place, then shift what follows.
+        var place = self.count
+        for index in 0..<self.count:
+            if precedes(name, try self.at(index)):
+                place = index
+                break
+        let at = self.starts[place] if place < self.count else self.used
+        var move = self.used
+        while move > at:
+            move -= 1
+            self.bytes[move + name.length] = self.bytes[move]
+        memory.copy(self.bytes[at..], name.bytes, name.length)
+        var index = self.count
+        while index > place:
+            self.starts[index] = self.starts[index - 1] + name.length
+            index -= 1
+        self.starts[place] = at
+        self.used += name.length
+        self.count += 1
+
+    pub mutating func close():
+        if self.bytes.length > 0:
+            free(self.bytes) in memory.heap
+        if self.starts.length > 0:
+            free(self.starts) in memory.heap
+        var no_bytes: u8[]
+        var no_starts: usize[]
+        self.bytes = no_bytes
+        self.starts = no_starts
+        self.count = 0
+        self.used = 0
+
+## Whether `a` sorts before `b`, byte by byte, letters without regard to case.
+func precedes(a: str, b: str) -> bool:
+    let shorter = a.length if a.length < b.length else b.length
+    for index in 0..<shorter:
+        let x = folded(a.bytes[index])
+        let y = folded(b.bytes[index])
+        if x != y:
+            return x < y
+    return a.length < b.length
+
+func folded(byte: u8) -> u8:
+    return byte + 32 if byte >= 65 and byte <= 90 else byte
+
+## Whether `text` holds `word`, letters without regard to case.
+func holds(text: str, word: str) -> bool:
+    if word.length > text.length:
+        return false
+    for start in 0..<(text.length - word.length + 1):
+        var same = true
+        for index in 0..<word.length:
+            if folded(text.bytes[start + index]) != folded(word.bytes[index]):
+                same = false
+                break
+        if same:
+            return true
+    return false
+
+## The installed font families, sorted.
+pub func families() -> Names!:
+    try check_thread()
+    var names = try Names.create()
+    errdefer names.close()
+    if platform.macos:
+        try mac_families(&names)
+    elif platform.windows:
+        try win_families(&names)
+    elif platform.linux:
+        try linux_families(&names)
+    else:
+        error(failed, "native fonts are unavailable on this target")
+    return names
+
+## The styles `family` comes in ("Regular", "Bold", "Italic"…), sorted.
+pub func styles(family: str) -> Names!:
+    try check_thread()
+    try check_name(family)
+    var names = try Names.create()
+    errdefer names.close()
+    if platform.macos:
+        try mac_styles(family, &names)
+    elif platform.windows:
+        try win_styles(family, &names)
+    elif platform.linux:
+        try linux_styles(&names)
+    else:
+        error(failed, "native fonts are unavailable on this target")
+    if names.length() == 0:
+        try names.add("Regular")
+    return names
+
+# mark: A face =================================================================================
+
+## A face of an installed family in one of its styles, `size` pixels to the
+## em; an unknown family or style falls back to what the system finds
+## nearest. Requires the UI thread; copies borrow one native owner.
+pub struct TypeFace:
+    var native: void*?
+    var auxiliary: void*?
+    pub let size: f64
+    ## Above and below the baseline, and the gap the face puts between lines, in pixels.
+    pub let ascent: f64
+    pub let descent: f64
+    pub let gap: f64
+
+    pub func init(family: str, style: str = "Regular", size: f64 = 32.0) -> !:
+        try check_thread()
+        try check_name(family)
+        try check_name(style)
+        if not (size >= 1.0 and size <= 2000.0):
+            error(failed, "type sizes are 1..2000 pixels")
+        let loaded = try load_type(family, style, size)
+        self.native = loaded.native
+        self.auxiliary = loaded.auxiliary
+        self.size = size
+        self.ascent = loaded.ascent
+        self.descent = loaded.descent
+        self.gap = loaded.gap
+
+    ## The distance between baselines the face asks for.
+    pub func line_height() -> f64:
+        return self.ascent + self.descent + self.gap
+
+    ## The advance of `text`, one line, in pixels.
+    pub func measure(text: str) -> f64!:
+        try check_thread()
+        if self.native == none:
+            error(failed, "the face is closed")
+        if text.length == 0:
+            return 0.0
+        if platform.macos:
+            return try mac_measure_run(&self, text)
+        if platform.windows:
+            return try win_measure_run(&self, text)
+        return try linux_measure_run(&self, text)
+
+    pub mutating func close():
+        if let native = self.native:
+            if platform.macos:
+                CFRelease(native)
+            elif platform.windows:
+                win_close(native, self.auxiliary)
+            elif platform.linux:
+                cairo_destroy(native)
+            self.native = none
+            self.auxiliary = none
+
+struct LoadedType:
+    var native: void*?
+    var auxiliary: void*?
+    var ascent: f64
+    var descent: f64
+    var gap: f64
+
+func load_type(family: str, style: str, size: f64) -> LoadedType!:
+    if platform.macos:
+        return try mac_type(family, style, size)
+    if platform.windows:
+        return try win_type(family, style, size)
+    if platform.linux:
+        return try linux_type(family, style, size)
+    error(failed, "native fonts are unavailable on this target")
+
+func check_name(name: str) -> !:
+    if name.length > 255 or not utf8.valid(name.bytes):
+        error(failed, "font names must be UTF-8 within 255 bytes")
+    for byte in name.bytes:
+        if byte == 0:
+            error(failed, "font names cannot contain NUL")
+
+# mark: Paragraphs =============================================================================
+
+## How text is set: in a box `width` pixels wide (0: point text, broken only
+## at newlines); `alignment` 0 left, 1 center, 2 right, 3 justified (the last
+## line of each paragraph left); `tracking` in thousandths of an em between
+## letters; `leading` the distance between baselines (0: the face's).
+pub struct Setting:
+    pub var width: f64 = 0.0
+    pub var alignment: i64 = 0
+    pub var tracking: f64 = 0.0
+    pub var leading: f64 = 0.0
+
+## Where set text's ink lies against its origin (the first line's top-left):
+## the coverage image, and the image pixel that origin falls on.
+pub struct SetText:
+    pub var bitmap: Bitmap
+    pub var origin_x: f64
+    pub var origin_y: f64
+    ## The box the text takes: its width and the lines' height.
+    pub var width: f64
+    pub var height: f64
+    pub var lines: usize
+
+    pub mutating func close():
+        self.bitmap.close()
+
+## One line as laid out: where in the text it runs, and its width.
+struct Line:
+    var start: usize
+    var end: usize
+    var width: f64
+    ## The last line of a paragraph (justified text leaves it be).
+    var last: bool
+
+## Set `text` with `face` as `setting` says, as coverage.
+pub func set_text(face: const TypeFace*, text: str, setting: Setting) -> SetText!:
+    try check_thread()
+    if text.length > 65536 or not utf8.valid(text.bytes):
+        error(failed, "text is valid UTF-8 within 64 KiB")
+    if not (setting.width >= 0.0 and setting.width <= 30000.0) or setting.alignment < 0 or setting.alignment > 3:
+        error(failed, "a text box is 0..30000 pixels wide and aligned 0..3")
+    if not math.is_finite(setting.tracking) or not (setting.leading >= 0.0 and setting.leading <= 10000.0):
+        error(failed, "tracking must be finite and leading 0..10000 pixels")
+    let spacing = setting.tracking / 1000.0 * face.size
+    var lines = try alloc Line[text.length + 1] in memory.heap
+    defer free(lines) in memory.heap
+    let count = try break_lines(face, text, setting.width, spacing, lines)
+    let pitch = setting.leading if setting.leading > 0.0 else face.line_height()
+    var widest = 0.0
+    for index in 0..<count:
+        widest = math.max(widest, lines[index].width)
+    let box_width = setting.width if setting.width > 0.0 else widest
+    let box_height = pitch * (f64)(count - 1) + face.ascent + face.descent
+    # Room round the box for ink past the metrics: italics, swashes, tracking.
+    let margin = math.ceil(face.size * 0.25) + 2.0
+    let columns = (usize)math.ceil(math.max(box_width, widest) + margin * 2.0)
+    let rows = (usize)math.ceil(box_height + margin * 2.0)
+    if columns * rows > 67108864:
+        error(failed, "set text exceeds the 64 MiB image limit")
+    let pixels = try alloc u8[columns * rows] in memory.heap
+    for at in 0..<pixels.length:
+        pixels[at] = 0
+    var bitmap = Bitmap(pixels, (u32)columns, (u32)rows, margin)
+    errdefer bitmap.close()
+    for index in 0..<count:
+        let line = lines[index]
+        let baseline = margin + face.ascent + pitch * (f64)index
+        var x = margin
+        if setting.alignment == 1:
+            x += (box_width - line.width) * 0.5
+        elif setting.alignment == 2:
+            x += box_width - line.width
+        let slice = (str)text.bytes[line.start..<line.end]
+        if setting.alignment == 3 and not line.last and setting.width > 0.0:
+            try draw_justified(face, slice, x, baseline, box_width, spacing, &bitmap)
+        else:
+            try draw_tracked(face, slice, x, baseline, spacing, &bitmap)
+    return SetText(bitmap = bitmap, origin_x = margin, origin_y = margin, width = box_width, height = box_height, lines = count)
+
+## The lines `text` breaks into: at newlines, and in a box `width` wide
+## between words (a word wider than the box between letters). Their count.
+func break_lines(face: const TypeFace*, text: str, width: f64, spacing: f64, lines: Line[]) -> usize!:
+    var count: usize = 0
+    var start: usize = 0
+    while true:
+        # One paragraph: up to the next newline or the end.
+        var end = start
+        while end < text.length and text.bytes[end] != 10:
+            end += 1
+        if width <= 0.0:
+            lines[count] = Line(start = start, end = end, width = try tracked_width(face, (str)text.bytes[start..<end], spacing), last = true)
+            count += 1
+        else:
+            count = try wrap(face, text, start, end, width, spacing, lines, count)
+        if end >= text.length:
+            break
+        start = end + 1
+    return count
+
+## The paragraph `start`..`end` of `text` broken into lines within `width`,
+## after the `count` lines so far; the count after.
+func wrap(face: const TypeFace*, text: str, start: usize, end: usize, width: f64, spacing: f64, lines: Line[], count: usize) -> usize!:
+    var total = count
+    var line_start = start
+    while true:
+        # Skip spaces a line would start with.
+        while line_start < end and text.bytes[line_start] == 32:
+            line_start += 1
+        if line_start >= end:
+            if total == count:
+                lines[total] = Line(start = line_start, end = line_start, width = 0.0, last = true)
+                total += 1
+            else:
+                lines[total - 1].last = true
+            return total
+        # The most words that fit; at least one letter.
+        var fitted = line_start
+        var fitted_width = 0.0
+        var at = line_start
+        while at <= end:
+            if at == end or text.bytes[at] == 32:
+                let candidate = try tracked_width(face, (str)text.bytes[line_start..<at], spacing)
+                if candidate > width and fitted > line_start:
+                    break
+                fitted = at
+                fitted_width = candidate
+                if candidate > width:
+                    break
+            at += 1
+        if fitted_width > width:
+            # One word wider than the box: as many letters as fit.
+            var letters = line_start
+            var letters_width = 0.0
+            var next = line_start
+            while next < fitted:
+                let decoded = utf8.decode(text.bytes, next) else error(failed, "text must be valid UTF-8")
+                let step = decoded.width
+                let candidate = try tracked_width(face, (str)text.bytes[line_start..<(next + step)], spacing)
+                if candidate > width and letters > line_start:
+                    break
+                letters = next + step
+                letters_width = candidate
+                next += step
+            fitted = letters
+            fitted_width = letters_width
+        lines[total] = Line(start = line_start, end = fitted, width = fitted_width, last = false)
+        total += 1
+        line_start = fitted
+    return total
+
+## The width of `text` with `spacing` pixels after every letter but the last.
+func tracked_width(face: const TypeFace*, text: str, spacing: f64) -> f64!:
+    if text.length == 0:
+        return 0.0
+    return (try face.measure(text)) + spacing * (f64)(try scalars(text) - 1)
+
+func scalars(text: str) -> usize!:
+    var offset: usize = 0
+    var count: usize = 0
+    while offset < text.length:
+        let decoded = utf8.decode(text.bytes, offset) else error(failed, "text must be valid UTF-8")
+        offset += decoded.width
+        count += 1
+    return count
+
+## `text` drawn from `x` on `baseline`, `spacing` pixels after each letter;
+## untracked it is drawn whole, so the face's kerning stays.
+func draw_tracked(face: const TypeFace*, text: str, x: f64, baseline: f64, spacing: f64, bitmap: Bitmap*) -> !:
+    if text.length == 0:
+        return
+    if spacing == 0.0:
+        try draw_run(face, text, x, baseline, bitmap)
+        return
+    # Each letter where the run so far puts it, plus the tracking before it.
+    var offset: usize = 0
+    var index: usize = 0
+    while offset < text.length:
+        let decoded = utf8.decode(text.bytes, offset) else error(failed, "text must be valid UTF-8")
+        let before = try face.measure((str)text.bytes[..<offset]) if offset > 0 else 0.0
+        try draw_run(face, (str)text.bytes[offset..<(offset + decoded.width)], x + before + spacing * (f64)index, baseline, bitmap)
+        offset += decoded.width
+        index += 1
+
+## A justified line: its words spread so it fills `width`.
+func draw_justified(face: const TypeFace*, text: str, x: f64, baseline: f64, width: f64, spacing: f64, bitmap: Bitmap*) -> !:
+    var gaps: usize = 0
+    for byte in text.bytes:
+        if byte == 32:
+            gaps += 1
+    let natural = try tracked_width(face, text, spacing)
+    if gaps == 0:
+        try draw_tracked(face, text, x, baseline, spacing, bitmap)
+        return
+    let extra = (width - natural) / (f64)gaps
+    var word_start: usize = 0
+    var spaces_before: usize = 0
+    var at: usize = 0
+    while at <= text.length:
+        if at == text.length or text.bytes[at] == 32:
+            if at > word_start:
+                let before = try tracked_width(face, (str)text.bytes[..<word_start], spacing) if word_start > 0 else 0.0
+                let lead = spacing if word_start > 0 else 0.0
+                try draw_tracked(face, (str)text.bytes[word_start..<at], x + before + lead + extra * (f64)spaces_before, baseline, spacing, bitmap)
+            if at < text.length:
+                spaces_before += 1
+            word_start = at + 1
+        at += 1
+
+## One run of text drawn into `bitmap`'s coverage from `x` along `baseline`.
+func draw_run(face: const TypeFace*, text: str, x: f64, baseline: f64, bitmap: Bitmap*) -> !:
+    if face.native == none:
+        error(failed, "the face is closed")
+    if platform.macos:
+        try mac_draw_run(face, text, x, baseline, bitmap)
+    elif platform.windows:
+        try win_draw_run(face, text, x, baseline, bitmap)
+    else:
+        try linux_draw_run(face, text, x, baseline, bitmap)

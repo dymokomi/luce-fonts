@@ -17,6 +17,7 @@ import strings
 import thread
 import utf8
 import windows_text
+import windows_abi
 ## A font operation failed, or its arguments were rejected.
 pub let failed: ErrorCode = ErrorCode.package(118)
 

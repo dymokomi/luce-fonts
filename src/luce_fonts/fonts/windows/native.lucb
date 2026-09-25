@@ -136,3 +136,154 @@ func win_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
                         if coverage > bitmap.pixels[at]:
                             bitmap.pixels[at] = coverage
         index += 1
+
+# mark: Proportional type ======================================================================
+
+extern struct TextExtent:
+    width: i32
+    height: i32
+
+extern struct EnumLogFont:
+    font: FontLog
+    full: u16[64]
+    style: u16[32]
+    script: u16[32]
+
+extern func GetTextExtentPoint32W(dc: void*, text: const u16*, count: i32, size: TextExtent*) -> i32
+extern func EnumFontFamiliesExW(dc: void*, font: FontLog*, procedure: func(const EnumLogFont*, const void*, u32, isize) -> i32, parameter: isize, flags: u32) -> i32
+
+## GDI's weight for a style name: Thin 100 … Black 900, Regular 400.
+func win_weight(style: str) -> i32:
+    if holds(style, "thin"):
+        return 100
+    if holds(style, "extralight") or holds(style, "ultralight"):
+        return 200
+    if holds(style, "light"):
+        return 300
+    if holds(style, "medium"):
+        return 500
+    if holds(style, "semibold") or holds(style, "demibold"):
+        return 600
+    if holds(style, "extrabold") or holds(style, "ultrabold"):
+        return 800
+    if holds(style, "black") or holds(style, "heavy"):
+        return 900
+    if holds(style, "bold"):
+        return 700
+    return 400
+
+func win_type(family: str, style: str, size: f64) -> LoadedType!:
+    let text = try family_bytes(family)
+    defer free(text)
+    let wide = try windows_text.wide((c.str)text.data, failed)
+    defer free(wide)
+    if wide.length > 32:
+        error(failed, "Windows font families support at most 31 UTF-16 units")
+    let italic = holds(style, "italic") or holds(style, "oblique")
+    var description = FontLog(height = -(i32)math.round(size), weight = win_weight(style), italic = 1 if italic else 0, charset = 1, precision = 4, quality = 4)
+    for index in 0..<wide.length:
+        description.family[index] = wide[index]
+    let font = CreateFontIndirectW(&description) else error(failed, "could not load the font")
+    errdefer discard(DeleteObject(font))
+    let dc = CreateCompatibleDC(none) else error(failed, "could not create a font context")
+    errdefer discard(DeleteDC(dc))
+    discard(SelectObject(dc, font) else error(failed, "could not select the font"))
+    var metrics: FontMetrics
+    if GetTextMetricsW(dc, &metrics) == 0:
+        error(failed, "could not read the font's metrics")
+    return LoadedType(native = dc, auxiliary = font, ascent = (f64)metrics.ascent, descent = (f64)metrics.descent, gap = (f64)metrics.external)
+
+func win_measure_run(face: const TypeFace*, text: str) -> f64!:
+    let dc = face.native else error(failed, "the face is closed")
+    let bytes = try family_bytes(text)
+    defer free(bytes)
+    let wide = try windows_text.wide((c.str)bytes.data, failed)
+    defer free(wide)
+    var extent: TextExtent
+    if GetTextExtentPoint32W(dc, wide.data, (i32)wide.length - 1, &extent) == 0:
+        error(failed, "could not measure the text")
+    return (f64)extent.width
+
+## Each glyph's 65-level coverage laid at the pen, the pen moved by its advance.
+func win_draw_run(face: const TypeFace*, text: str, x: f64, baseline: f64, bitmap: Bitmap*) -> !:
+    let dc = face.native else error(failed, "the face is closed")
+    var matrix = FontMatrix()
+    var pen = x
+    var offset: usize = 0
+    while offset < text.length:
+        let decoded = utf8.decode(text.bytes, offset) else error(failed, "text must be valid UTF-8")
+        offset += decoded.width
+        var metrics: GlyphMetrics
+        let character = (u32)decoded.scalar if (u32)decoded.scalar <= 65535 else (u32)65533
+        let length = GetGlyphOutlineW(dc, character, 6, &metrics, 0, none, &matrix)
+        if length == 4294967295 or length > 16777216:
+            error(failed, "could not rasterize the font glyph")
+        if length > 0:
+            let native = try alloc u8[(usize)length] in memory.heap
+            defer free(native) in memory.heap
+            if GetGlyphOutlineW(dc, character, 6, &metrics, length, native.data, &matrix) == 4294967295:
+                error(failed, "could not read font coverage")
+            let stride = ((usize)metrics.width + 3) // 4 * 4
+            if stride * (usize)metrics.height > native.length:
+                error(failed, "native glyph dimensions exceed its buffer")
+            let left = (i64)math.round(pen) + (i64)metrics.x
+            let top = (i64)math.round(baseline) - (i64)metrics.y
+            for row in 0..<(usize)metrics.height:
+                for column in 0..<(usize)metrics.width:
+                    let px = left + (i64)column
+                    let py = top + (i64)row
+                    if px >= 0 and py >= 0 and px < (i64)bitmap.width and py < (i64)bitmap.height:
+                        let coverage = (u8)(((u32)native[row * stride + column] * 255 + 32) // 64)
+                        let at = (usize)py * (usize)bitmap.width + (usize)px
+                        if coverage > bitmap.pixels[at]:
+                            bitmap.pixels[at] = coverage
+        pen += (f64)metrics.advance_x
+
+## EnumFontFamiliesExW's callbacks: each family, or each style, into the
+## Names whose address is `parameter`; vertical ("@") faces are skipped.
+func win_family_found(font: const EnumLogFont*, metrics: const void*, kind: u32, parameter: isize) -> i32:
+    discard(metrics)
+    discard(kind)
+    win_add_name(font.font.family[..<32], parameter)
+    return 1
+
+func win_style_found(font: const EnumLogFont*, metrics: const void*, kind: u32, parameter: isize) -> i32:
+    discard(metrics)
+    discard(kind)
+    win_add_name(font.style[..<32], parameter)
+    return 1
+
+func win_add_name(source: const u16[], parameter: isize):
+    var length: usize = 0
+    while length < source.length and source[length] != 0:
+        length += 1
+    if length == 0 or source[0] == 64:
+        return
+    var buffer: u8[256]
+    let count = windows_abi.WideCharToMultiByte(windows_abi.utf8_page, 0, source.data, (i32)length, &buffer[0], 255, none, none)
+    if count <= 0:
+        return
+    let names = (Names*)(void*)parameter
+    names.add((str)buffer[..<(usize)count]) catch _:
+        return
+
+func win_enumerate(family: str, listing_styles: bool, names: Names*) -> !:
+    let dc = CreateCompatibleDC(none) else error(failed, "could not create a font context")
+    defer discard(DeleteDC(dc))
+    var description = FontLog(charset = 1)
+    if family.length > 0:
+        let text = try family_bytes(family)
+        defer free(text)
+        let wide = try windows_text.wide((c.str)text.data, failed)
+        defer free(wide)
+        if wide.length > 32:
+            error(failed, "Windows font families support at most 31 UTF-16 units")
+        for index in 0..<wide.length:
+            description.family[index] = wide[index]
+    discard(EnumFontFamiliesExW(dc, &description, win_style_found if listing_styles else win_family_found, (isize)(void*)names, 0))
+
+func win_families(names: Names*) -> !:
+    try win_enumerate("", false, names)
+
+func win_styles(family: str, names: Names*) -> !:
+    try win_enumerate(family, true, names)
