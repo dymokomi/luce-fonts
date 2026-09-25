@@ -23,73 +23,132 @@ extern struct CairoTextMetrics:
     advance_x: f64
     advance_y: f64
 
-extern func cairo_image_surface_create(format: i32, width: i32, height: i32) -> void*
-extern func cairo_surface_status(surface: void*) -> i32
-extern func cairo_surface_destroy(surface: void*)
-extern func cairo_surface_flush(surface: void*)
-extern func cairo_image_surface_get_data(surface: void*) -> u8*
-extern func cairo_image_surface_get_stride(surface: void*) -> i32
-extern func cairo_create(surface: void*) -> void*
-extern func cairo_destroy(context: void*)
-extern func cairo_status(context: void*) -> i32
-extern func cairo_select_font_face(context: void*, family: c.str, slant: i32, weight: i32)
-extern func cairo_set_font_size(context: void*, size: f64)
-extern func cairo_font_extents(context: void*, metrics: CairoFontMetrics*)
-extern func cairo_text_extents(context: void*, text: c.str, metrics: CairoTextMetrics*)
-extern func cairo_get_scaled_font(context: void*) -> void*
-extern func cairo_scaled_font_reference(font: void*) -> void*
-extern func cairo_scaled_font_destroy(font: void*)
-extern func cairo_scaled_font_get_font_face(font: void*) -> void*
-extern func cairo_set_font_face(context: void*, face: void*)
-extern func cairo_set_source_rgba(context: void*, red: f64, green: f64, blue: f64, alpha: f64)
-extern func cairo_move_to(context: void*, x: f64, y: f64)
-extern func cairo_show_text(context: void*, text: c.str)
-extern func cairo_font_options_create() -> void*
-extern func cairo_font_options_destroy(options: void*)
-extern func cairo_font_options_set_antialias(options: void*, antialias: i32)
-extern func cairo_font_options_set_hint_metrics(options: void*, hint: i32)
-extern func cairo_set_font_options(context: void*, options: void*)
+extern func dlopen(file: c.str, mode: i32) -> void*?
+extern func dlsym(handle: void*, name: c.str) -> void*?
 
-func linux_options(context: void*):
-    let options = cairo_font_options_create()
-    defer cairo_font_options_destroy(options)
-    cairo_font_options_set_antialias(options, 2)
-    cairo_font_options_set_hint_metrics(options, 1)
-    cairo_set_font_options(context, options)
+## Cairo's functions, loaded on first use from the runtime library every
+## desktop has (libcairo.so.2): building needs no development package.
+struct CairoApi:
+    var image_surface_create: func(i32, i32, i32) -> void*
+    var surface_status: func(void*) -> i32
+    var surface_destroy: func(void*) -> unit
+    var surface_flush: func(void*) -> unit
+    var image_surface_get_data: func(void*) -> u8*
+    var image_surface_get_stride: func(void*) -> i32
+    var create: func(void*) -> void*
+    var destroy: func(void*) -> unit
+    var status: func(void*) -> i32
+    var select_font_face: func(void*, c.str, i32, i32) -> unit
+    var set_font_size: func(void*, f64) -> unit
+    var font_extents: func(void*, CairoFontMetrics*) -> unit
+    var text_extents: func(void*, c.str, CairoTextMetrics*) -> unit
+    var get_scaled_font: func(void*) -> void*
+    var scaled_font_reference: func(void*) -> void*
+    var scaled_font_destroy: func(void*) -> unit
+    var scaled_font_get_font_face: func(void*) -> void*
+    var set_font_face: func(void*, void*) -> unit
+    var set_source_rgba: func(void*, f64, f64, f64, f64) -> unit
+    var move_to: func(void*, f64, f64) -> unit
+    var show_text: func(void*, c.str) -> unit
+    var font_options_create: func() -> void*
+    var font_options_destroy: func(void*) -> unit
+    var font_options_set_antialias: func(void*, i32) -> unit
+    var font_options_set_hint_metrics: func(void*, i32) -> unit
+    var set_font_options: func(void*, void*) -> unit
+    var get_font_face: func(void*) -> void*
+
+var loaded_cairo: CairoApi? = none
+
+func cairo() -> CairoApi!:
+    if let api = loaded_cairo:
+        return api
+    # RTLD_NOW: every symbol is resolved here, not at a later call.
+    let library = dlopen("libcairo.so.2", 2) else error(failed, "Cairo (libcairo.so.2) is not installed")
+    let api = CairoApi(
+        image_surface_create = (func(i32, i32, i32) -> void*)(try cairo_symbol(library, "cairo_image_surface_create")),
+        surface_status = (func(void*) -> i32)(try cairo_symbol(library, "cairo_surface_status")),
+        surface_destroy = (func(void*) -> unit)(try cairo_symbol(library, "cairo_surface_destroy")),
+        surface_flush = (func(void*) -> unit)(try cairo_symbol(library, "cairo_surface_flush")),
+        image_surface_get_data = (func(void*) -> u8*)(try cairo_symbol(library, "cairo_image_surface_get_data")),
+        image_surface_get_stride = (func(void*) -> i32)(try cairo_symbol(library, "cairo_image_surface_get_stride")),
+        create = (func(void*) -> void*)(try cairo_symbol(library, "cairo_create")),
+        destroy = (func(void*) -> unit)(try cairo_symbol(library, "cairo_destroy")),
+        status = (func(void*) -> i32)(try cairo_symbol(library, "cairo_status")),
+        select_font_face = (func(void*, c.str, i32, i32) -> unit)(try cairo_symbol(library, "cairo_select_font_face")),
+        set_font_size = (func(void*, f64) -> unit)(try cairo_symbol(library, "cairo_set_font_size")),
+        font_extents = (func(void*, CairoFontMetrics*) -> unit)(try cairo_symbol(library, "cairo_font_extents")),
+        text_extents = (func(void*, c.str, CairoTextMetrics*) -> unit)(try cairo_symbol(library, "cairo_text_extents")),
+        get_scaled_font = (func(void*) -> void*)(try cairo_symbol(library, "cairo_get_scaled_font")),
+        scaled_font_reference = (func(void*) -> void*)(try cairo_symbol(library, "cairo_scaled_font_reference")),
+        scaled_font_destroy = (func(void*) -> unit)(try cairo_symbol(library, "cairo_scaled_font_destroy")),
+        scaled_font_get_font_face = (func(void*) -> void*)(try cairo_symbol(library, "cairo_scaled_font_get_font_face")),
+        set_font_face = (func(void*, void*) -> unit)(try cairo_symbol(library, "cairo_set_font_face")),
+        set_source_rgba = (func(void*, f64, f64, f64, f64) -> unit)(try cairo_symbol(library, "cairo_set_source_rgba")),
+        move_to = (func(void*, f64, f64) -> unit)(try cairo_symbol(library, "cairo_move_to")),
+        show_text = (func(void*, c.str) -> unit)(try cairo_symbol(library, "cairo_show_text")),
+        font_options_create = (func() -> void*)(try cairo_symbol(library, "cairo_font_options_create")),
+        font_options_destroy = (func(void*) -> unit)(try cairo_symbol(library, "cairo_font_options_destroy")),
+        font_options_set_antialias = (func(void*, i32) -> unit)(try cairo_symbol(library, "cairo_font_options_set_antialias")),
+        font_options_set_hint_metrics = (func(void*, i32) -> unit)(try cairo_symbol(library, "cairo_font_options_set_hint_metrics")),
+        set_font_options = (func(void*, void*) -> unit)(try cairo_symbol(library, "cairo_set_font_options")),
+        get_font_face = (func(void*) -> void*)(try cairo_symbol(library, "cairo_get_font_face")))
+    loaded_cairo = api
+    return api
+
+func cairo_symbol(library: void*, name: c.str) -> void*!:
+    return dlsym(library, name) else error(failed, "the installed Cairo lacks a function luce-fonts needs")
+
+## A face's Cairo objects released; they exist only once Cairo is loaded.
+func linux_release_font(font: void*):
+    if let api = loaded_cairo:
+        api.scaled_font_destroy(font)
+
+func linux_release_context(context: void*):
+    if let api = loaded_cairo:
+        api.destroy(context)
+
+func linux_options(api: CairoApi, context: void*):
+    let options = api.font_options_create()
+    defer api.font_options_destroy(options)
+    api.font_options_set_antialias(options, 2)
+    api.font_options_set_hint_metrics(options, 1)
+    api.set_font_options(context, options)
 
 func linux_face(size: f64, family: str) -> NativeFace!:
+    let api = try cairo()
     let name = try family_bytes("monospace" if family.length == 0 else family)
     defer free(name)
-    let surface = cairo_image_surface_create(2, 1, 1)
-    defer cairo_surface_destroy(surface)
-    let context = cairo_create(surface)
-    defer cairo_destroy(context)
-    linux_options(context)
-    cairo_select_font_face(context, (c.str)name.data, 0, 0)
-    cairo_set_font_size(context, size)
+    let surface = api.image_surface_create(2, 1, 1)
+    defer api.surface_destroy(surface)
+    let context = api.create(surface)
+    defer api.destroy(context)
+    linux_options(api, context)
+    api.select_font_face(context, (c.str)name.data, 0, 0)
+    api.set_font_size(context, size)
     var metrics: CairoFontMetrics
-    cairo_font_extents(context, &metrics)
+    api.font_extents(context, &metrics)
     var narrow: CairoTextMetrics
     var wide: CairoTextMetrics
-    cairo_text_extents(context, "i", &narrow)
-    cairo_text_extents(context, "W", &wide)
-    if cairo_status(context) != 0 or wide.advance_x <= 0.0 or math.abs(narrow.advance_x - wide.advance_x) > 0.01:
+    api.text_extents(context, "i", &narrow)
+    api.text_extents(context, "W", &wide)
+    if api.status(context) != 0 or wide.advance_x <= 0.0 or math.abs(narrow.advance_x - wide.advance_x) > 0.01:
         error(failed, "the requested font must be an available monospace face")
-    let font = cairo_scaled_font_reference(cairo_get_scaled_font(context))
+    let font = api.scaled_font_reference(api.get_scaled_font(context))
     return NativeFace(font, none, wide.advance_x, metrics.ascent, metrics.descent)
 
 func linux_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
+    let api = try cairo()
     let font = face.native else error(failed, "the font is closed")
-    let surface = cairo_image_surface_create(2, (i32)bitmap.width, (i32)bitmap.height)
-    defer cairo_surface_destroy(surface)
-    if cairo_surface_status(surface) != 0:
+    let surface = api.image_surface_create(2, (i32)bitmap.width, (i32)bitmap.height)
+    defer api.surface_destroy(surface)
+    if api.surface_status(surface) != 0:
         error(failed, "could not allocate font raster storage")
-    let context = cairo_create(surface)
-    defer cairo_destroy(context)
-    linux_options(context)
-    cairo_set_font_face(context, cairo_scaled_font_get_font_face(font))
-    cairo_set_font_size(context, face.size * scale)
-    cairo_set_source_rgba(context, 1.0, 1.0, 1.0, 1.0)
+    let context = api.create(surface)
+    defer api.destroy(context)
+    linux_options(api, context)
+    api.set_font_face(context, api.scaled_font_get_font_face(font))
+    api.set_font_size(context, face.size * scale)
+    api.set_source_rgba(context, 1.0, 1.0, 1.0, 1.0)
     var offset: usize = 0
     var index: usize = 0
     while offset < text.length:
@@ -98,67 +157,69 @@ func linux_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
         for byte in 0..<decoded.width:
             scalar[byte] = text.bytes[offset + byte]
         scalar[decoded.width] = 0
-        cairo_move_to(context, 2.0 + (f64)index * face.advance * scale, 2.0 + face.ascent * scale)
-        cairo_show_text(context, (c.str)&scalar[0])
+        api.move_to(context, 2.0 + (f64)index * face.advance * scale, 2.0 + face.ascent * scale)
+        api.show_text(context, (c.str)&scalar[0])
         offset += decoded.width
         index += 1
-    if cairo_status(context) != 0:
+    if api.status(context) != 0:
         error(failed, "could not rasterize the font text")
-    cairo_surface_flush(surface)
-    let source = cairo_image_surface_get_data(surface)
-    let stride = (usize)cairo_image_surface_get_stride(surface)
+    api.surface_flush(surface)
+    let source = api.image_surface_get_data(surface)
+    let stride = (usize)api.image_surface_get_stride(surface)
     for row in 0..<(usize)bitmap.height:
         memory.copy(bitmap.pixels[row * (usize)bitmap.width..], u8[](source + row * stride, (usize)bitmap.width), (usize)bitmap.width)
 
 # mark: Proportional type ======================================================================
 
-extern func cairo_get_font_face(context: void*) -> void*
 
 func linux_type(family: str, style: str, size: f64) -> LoadedType!:
+    let api = try cairo()
     let name = try family_bytes(family)
     defer free(name)
-    let surface = cairo_image_surface_create(2, 1, 1)
-    defer cairo_surface_destroy(surface)
-    let context = cairo_create(surface)
-    errdefer cairo_destroy(context)
-    linux_options(context)
+    let surface = api.image_surface_create(2, 1, 1)
+    defer api.surface_destroy(surface)
+    let context = api.create(surface)
+    errdefer api.destroy(context)
+    linux_options(api, context)
     let italic = holds(style, "italic") or holds(style, "oblique")
-    cairo_select_font_face(context, (c.str)name.data, 1 if italic else 0, 1 if holds(style, "bold") else 0)
-    cairo_set_font_size(context, size)
+    api.select_font_face(context, (c.str)name.data, 1 if italic else 0, 1 if holds(style, "bold") else 0)
+    api.set_font_size(context, size)
     var metrics: CairoFontMetrics
-    cairo_font_extents(context, &metrics)
-    if cairo_status(context) != 0:
+    api.font_extents(context, &metrics)
+    if api.status(context) != 0:
         error(failed, "could not load the font")
     return LoadedType(native = context, auxiliary = none, ascent = metrics.ascent, descent = metrics.descent,
                       gap = math.max(0.0, metrics.height - metrics.ascent - metrics.descent))
 
 func linux_measure_run(face: const TypeFace*, text: str) -> f64!:
+    let api = try cairo()
     let context = face.native else error(failed, "the face is closed")
     let bytes = try family_bytes(text)
     defer free(bytes)
     var extents: CairoTextMetrics
-    cairo_text_extents(context, (c.str)bytes.data, &extents)
+    api.text_extents(context, (c.str)bytes.data, &extents)
     return extents.advance_x
 
 func linux_draw_run(face: const TypeFace*, text: str, x: f64, baseline: f64, bitmap: Bitmap*) -> !:
+    let api = try cairo()
     let source_context = face.native else error(failed, "the face is closed")
     let bytes = try family_bytes(text)
     defer free(bytes)
-    let surface = cairo_image_surface_create(2, (i32)bitmap.width, (i32)bitmap.height)
-    defer cairo_surface_destroy(surface)
-    if cairo_surface_status(surface) != 0:
+    let surface = api.image_surface_create(2, (i32)bitmap.width, (i32)bitmap.height)
+    defer api.surface_destroy(surface)
+    if api.surface_status(surface) != 0:
         error(failed, "could not allocate font raster storage")
-    let context = cairo_create(surface)
-    defer cairo_destroy(context)
-    linux_options(context)
-    cairo_set_font_face(context, cairo_get_font_face(source_context))
-    cairo_set_font_size(context, face.size)
-    cairo_set_source_rgba(context, 1.0, 1.0, 1.0, 1.0)
-    cairo_move_to(context, x, baseline)
-    cairo_show_text(context, (c.str)bytes.data)
-    cairo_surface_flush(surface)
-    let source = cairo_image_surface_get_data(surface)
-    let stride = (usize)cairo_image_surface_get_stride(surface)
+    let context = api.create(surface)
+    defer api.destroy(context)
+    linux_options(api, context)
+    api.set_font_face(context, api.get_font_face(source_context))
+    api.set_font_size(context, face.size)
+    api.set_source_rgba(context, 1.0, 1.0, 1.0, 1.0)
+    api.move_to(context, x, baseline)
+    api.show_text(context, (c.str)bytes.data)
+    api.surface_flush(surface)
+    let source = api.image_surface_get_data(surface)
+    let stride = (usize)api.image_surface_get_stride(surface)
     # Over what is there: the larger coverage wins.
     for row in 0..<(usize)bitmap.height:
         for column in 0..<(usize)bitmap.width:

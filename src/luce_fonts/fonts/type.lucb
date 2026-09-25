@@ -205,7 +205,7 @@ pub struct TypeFace:
             elif platform.windows:
                 win_close(native, self.auxiliary)
             elif platform.linux:
-                cairo_destroy(native)
+                linux_release_context(native)
             self.native = none
             self.auxiliary = none
 

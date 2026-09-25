@@ -112,7 +112,7 @@ pub struct Face:
             elif platform.windows:
                 win_close(native, self.auxiliary)
             elif platform.linux:
-                cairo_scaled_font_destroy(native)
+                linux_release_font(native)
             self.native = none
             self.auxiliary = none
 
