@@ -146,7 +146,7 @@ pub func styles(family: str) -> Names!:
     elif platform.windows:
         try win_styles(family, &names)
     elif platform.linux:
-        try linux_styles(&names)
+        try linux_styles(family, &names)
     else:
         error(failed, "native fonts are unavailable on this target")
     if names.length() == 0:

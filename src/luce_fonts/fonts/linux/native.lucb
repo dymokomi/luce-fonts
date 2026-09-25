@@ -228,11 +228,83 @@ func linux_draw_run(face: const TypeFace*, text: str, x: f64, baseline: f64, bit
             if value > bitmap.pixels[at]:
                 bitmap.pixels[at] = value
 
-## Without fontconfig's list, the families every desktop resolves.
-func linux_families(names: Names*) -> !:
-    for name in ["Sans", "Serif", "Monospace"]:
-        try names.add(name)
+# mark: Families and styles ==================================================================
 
-func linux_styles(names: Names*) -> !:
-    for name in ["Regular", "Bold", "Italic", "Bold Italic"]:
-        try names.add(name)
+## FcFontSet: the matched patterns.
+extern struct FcFontSet:
+    count: i32
+    size: i32
+    fonts: void**
+
+## Fontconfig's functions for listing, loaded on first use from the runtime
+## library every desktop has (libfontconfig.so.1), as Cairo's are.
+struct FontconfigApi:
+    var init_load: func() -> void*?
+    var pattern_create: func() -> void*
+    var pattern_destroy: func(void*) -> unit
+    var pattern_add_string: func(void*, c.str, c.str) -> i32
+    var pattern_get_string: func(void*, c.str, i32, c.char**) -> i32
+    var object_set_create: func() -> void*
+    var object_set_add: func(void*, c.str) -> i32
+    var object_set_destroy: func(void*) -> unit
+    var font_list: func(void*?, void*, void*) -> FcFontSet*?
+    var font_set_destroy: func(FcFontSet*) -> unit
+
+var loaded_fontconfig: FontconfigApi? = none
+
+func fontconfig() -> FontconfigApi!:
+    if let api = loaded_fontconfig:
+        return api
+    let library = dlopen("libfontconfig.so.1", 2) else error(failed, "Fontconfig (libfontconfig.so.1) is not installed")
+    let api = FontconfigApi(
+        init_load = (func() -> void*?)(try cairo_symbol(library, "FcInitLoadConfigAndFonts")),
+        pattern_create = (func() -> void*)(try cairo_symbol(library, "FcPatternCreate")),
+        pattern_destroy = (func(void*) -> unit)(try cairo_symbol(library, "FcPatternDestroy")),
+        pattern_add_string = (func(void*, c.str, c.str) -> i32)(try cairo_symbol(library, "FcPatternAddString")),
+        pattern_get_string = (func(void*, c.str, i32, c.char**) -> i32)(try cairo_symbol(library, "FcPatternGetString")),
+        object_set_create = (func() -> void*)(try cairo_symbol(library, "FcObjectSetCreate")),
+        object_set_add = (func(void*, c.str) -> i32)(try cairo_symbol(library, "FcObjectSetAdd")),
+        object_set_destroy = (func(void*) -> unit)(try cairo_symbol(library, "FcObjectSetDestroy")),
+        font_list = (func(void*?, void*, void*) -> FcFontSet*?)(try cairo_symbol(library, "FcFontList")),
+        font_set_destroy = (func(FcFontSet*) -> unit)(try cairo_symbol(library, "FcFontSetDestroy")))
+    discard(api.init_load())
+    loaded_fontconfig = api
+    return api
+
+## The installed families, from fontconfig; the three every desktop resolves
+## when fontconfig is missing.
+func linux_families(names: Names*) -> !:
+    let api = fontconfig() catch failure:
+        discard(failure)
+        for name in ["Sans", "Serif", "Monospace"]:
+            try names.add(name)
+        return
+    try linux_list(api, "", "family", names)
+
+## The styles `family` comes in, from fontconfig.
+func linux_styles(family: str, names: Names*) -> !:
+    let api = fontconfig() catch failure:
+        discard(failure)
+        for name in ["Regular", "Bold", "Italic", "Bold Italic"]:
+            try names.add(name)
+        return
+    try linux_list(api, family, "style", names)
+
+## Every value of `property` among the fonts of `family` ("" for all fonts).
+func linux_list(api: FontconfigApi, family: str, property: c.str, names: Names*) -> !:
+    let pattern = api.pattern_create()
+    defer api.pattern_destroy(pattern)
+    if family.length > 0:
+        let name = try family_bytes(family)
+        defer free(name)
+        discard(api.pattern_add_string(pattern, "family", (c.str)name.data))
+    let wanted = api.object_set_create()
+    defer api.object_set_destroy(wanted)
+    discard(api.object_set_add(wanted, property))
+    let found = api.font_list(none, pattern, wanted) else error(failed, "fontconfig could not list the fonts")
+    defer api.font_set_destroy(found)
+    for index in 0..<(usize)found.count:
+        var value: c.char* = (c.char*)(void*)0
+        # FcResultMatch is 0; the value is borrowed from the set.
+        if api.pattern_get_string(found.fonts[index], property, 0, &value) == 0:
+            try names.add(str((c.str)value) catch: recover "")
