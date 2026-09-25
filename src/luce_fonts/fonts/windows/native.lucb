@@ -150,6 +150,7 @@ extern struct EnumLogFont:
     script: u16[32]
 
 extern func GetTextExtentPoint32W(dc: void*, text: const u16*, count: i32, size: TextExtent*) -> i32
+extern func GetGlyphIndicesW(dc: void*, text: const u16*, count: i32, indices: u16*, flags: u32) -> u32
 extern func EnumFontFamiliesExW(dc: void*, font: FontLog*, procedure: func(const EnumLogFont*, const void*, u32, isize) -> i32, parameter: isize, flags: u32) -> i32
 
 ## GDI's weight for a style name: Thin 100 … Black 900, Regular 400.
@@ -244,10 +245,29 @@ func win_draw_run(face: const TypeFace*, text: str, x: f64, baseline: f64, bitma
 func win_family_found(font: const EnumLogFont*, metrics: const void*, kind: u32, parameter: isize) -> i32:
     discard(metrics)
     # Outline fonts only: raster ones ("8514oem") cannot be set at any size.
-    # Symbol fonts (Wingdings, "HoloLens MDL2 Assets") are icons, not type.
-    if (kind & 1) == 0 and font.font.charset != 2:
+    # Symbol and icon fonts (Wingdings, "Segoe MDL2 Assets") are not type.
+    if (kind & 1) == 0 and font.font.charset != 2 and win_has_latin(&font.font):
         win_add_name(font.font.family[..<32], parameter)
     return 1
+
+## Whether the face has glyphs for "AZaz": icon fonts that claim an ordinary
+## character set ("HoloLens MDL2 Assets") have none.
+func win_has_latin(description: const FontLog*) -> bool:
+    let handle = CreateFontIndirectW(description) else return false
+    defer discard(DeleteObject(handle))
+    let dc = CreateCompatibleDC(none) else return false
+    defer discard(DeleteDC(dc))
+    let original = SelectObject(dc, handle) else return false
+    defer discard(SelectObject(dc, original))
+    let letters: u16[4] = [65, 90, 97, 122]
+    var glyphs: u16[4] = [0, 0, 0, 0]
+    # GGI_MARK_NONEXISTING_GLYPHS: a missing letter maps to 0xFFFF.
+    if GetGlyphIndicesW(dc, &letters[0], 4, &glyphs[0], 1) != 4:
+        return false
+    for glyph in glyphs:
+        if glyph == 65535:
+            return false
+    return true
 
 func win_style_found(font: const EnumLogFont*, metrics: const void*, kind: u32, parameter: isize) -> i32:
     discard(metrics)
