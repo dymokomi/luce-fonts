@@ -243,8 +243,9 @@ func win_draw_run(face: const TypeFace*, text: str, x: f64, baseline: f64, bitma
 ## Names whose address is `parameter`; vertical ("@") faces are skipped.
 func win_family_found(font: const EnumLogFont*, metrics: const void*, kind: u32, parameter: isize) -> i32:
     discard(metrics)
-    discard(kind)
-    win_add_name(font.font.family[..<32], parameter)
+    # Outline fonts only: raster ones ("8514oem") cannot be set at any size.
+    if (kind & 1) == 0:
+        win_add_name(font.font.family[..<32], parameter)
     return 1
 
 func win_style_found(font: const EnumLogFont*, metrics: const void*, kind: u32, parameter: isize) -> i32:
