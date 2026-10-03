@@ -1,12 +1,19 @@
 # luce-fonts
 
-Native font rasterisation: glyph coverage and metrics from the platform's text engine.
+Fonts for Luce: native font rasterisation (glyph coverage and metrics from the platform's
+text engine), and a portable font engine in pure Luce that reads OpenType, TrueType, CFF and
+WOFF files and shapes text as HarfBuzz does.
 
 ## Modules
 
 | import | what it holds |
 | --- | --- |
 | `import fonts` | Native font resources, grayscale rasterization and terminal cell widths (`cells`, `text_cells`) |
+| `import opentype` | Font files without a platform library: faces of sfnt files and collections, cmaps, TrueType and CFF outlines as paths, FreeType/Skia-exact metrics at a size, WOFF unwrapping |
+| `import shaping` | HarfBuzz's default shaper over `opentype`: GSUB, GPOS and kern, marks, clusters, right-to-left runs |
+
+`docs/FONTS.md` describes the native module, `docs/OPENTYPE.md` the font engine (its API,
+limits, Unicode data and oracle tests).
 
 ## Using it
 
@@ -22,6 +29,7 @@ def dependency "luce-fonts" {
 ## Depends on
 
 - luce-std
+- luce-compress (WOFF's zlib tables)
 
 ## Platforms
 
@@ -39,4 +47,7 @@ Native libraries it links, by platform (declared in `package.prisma`, linked onl
 
 ## License
 
-MIT or Apache-2.0, at your option.
+MIT or Apache-2.0, at your option. The `opentype` and `shaping` modules come from the Luce
+port of Ladybird and are also under its BSD 2-Clause licence (`LICENSE-luce-browser`); they
+follow Skia (`LICENSE-skia`), FreeType and HarfBuzz in what they compute. The test fonts carry
+their own licences (`tests/fonts/NOTICE`).

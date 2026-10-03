@@ -1,0 +1,104 @@
+#==============================================================================================
+#
+#   list - a growable array that keeps the allocator it was built with
+#
+#   DESCRIPTION:
+#       The font reader and the shaper build outlines, glyph runs and lookup lists of
+#       unknown length. A List takes its storage from the allocator that was current when
+#       it first grew and keeps using it, whatever is current later, so a list made under a
+#       collected heap or an arena stays there (luce-base §12.3). Running out of memory
+#       traps, as the shaper has no way to report it.
+#
+#==============================================================================================
+
+## A growable array of `T`. The zero value is empty and allocates nothing. Copies share the
+## storage; `clone` makes an independent copy and `release` frees it.
+pub struct List[T]:
+    var items: T[]
+    var used: usize
+    var allocator: memory.Allocator?
+
+    ## How many items the list holds.
+    pub func length() -> usize:
+        return self.used
+
+    ## The items, as a span of the list's storage (valid until the list grows).
+    pub func view() -> T[]:
+        return self.items[..<self.used]
+
+    ## Item `index`, which must be below `length()`.
+    pub func at(index: usize) -> T*:
+        assert(index < self.used)
+        return &self.items[index]
+
+    ## The last item; the list must not be empty.
+    pub func last() -> T*:
+        assert(self.used > 0)
+        return &self.items[self.used - 1]
+
+    ## Room for at least `capacity` items without growing again.
+    pub mutating func reserve(capacity: usize):
+        if capacity <= self.items.length:
+            return
+        if self.allocator == none:
+            self.allocator = memory.allocator
+        var allocator = self.allocator else trap("a list without an allocator")
+        let larger = (alloc T[capacity] in allocator) else trap("out of memory")
+        if self.used > 0:
+            memory.copy(larger, self.items, self.used)
+        if self.items.length > 0:
+            free(self.items) in allocator
+        self.items = larger
+
+    ## Append `value`.
+    pub mutating func push(value: T):
+        if self.used == self.items.length:
+            self.reserve(8 if self.items.length == 0 else self.items.length * 2)
+        self.items[self.used] = value
+        self.used += 1
+
+    ## Insert `value` before item `index` (at most `length()`).
+    pub mutating func insert(index: usize, value: T):
+        assert(index <= self.used)
+        self.push(value)
+        var at = self.used - 1
+        while at > index:
+            self.items[at] = self.items[at - 1]
+            at -= 1
+        self.items[index] = value
+
+    ## Remove item `index`, moving the ones after it down.
+    pub mutating func remove(index: usize):
+        assert(index < self.used)
+        for at in index..<self.used - 1:
+            self.items[at] = self.items[at + 1]
+        self.used -= 1
+
+    ## Make the list `length` items long; new items are zero.
+    pub mutating func resize(length: usize):
+        if length > self.used:
+            self.reserve(length)
+            memory.set(u8[]((u8*)&self.items[self.used], (length - self.used) * sizeof(T)), 0)
+        self.used = length
+
+    ## Forget every item; the storage is kept for reuse.
+    pub mutating func clear():
+        self.used = 0
+
+    ## An independent copy of the list, in the current allocator.
+    pub func clone() -> List[T]:
+        var copy = List[T]()
+        copy.reserve(self.used)
+        if self.used > 0:
+            memory.copy(copy.items, self.items, self.used)
+        copy.used = self.used
+        return copy
+
+    ## Free the storage; the list is empty afterwards.
+    pub mutating func release():
+        if self.items.length > 0:
+            var allocator = self.allocator else trap("a list without an allocator")
+            free(self.items) in allocator
+        var empty: T[]
+        self.items = empty
+        self.used = 0

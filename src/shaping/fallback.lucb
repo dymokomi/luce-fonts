@@ -1,0 +1,384 @@
+#==============================================================================================
+#
+#   fallback - modified combining classes and HarfBuzz's fallback mark positioning
+#
+#   DESCRIPTION:
+#       HarfBuzz in Luce:
+#
+#       - HarfBuzz's modified combining classes (hb-unicode.cc _hb_modified_combining_class)
+#         and their recategorization for positioning (hb-ot-shape-fallback.cc);
+#       - hb_font_get_glyph_extents for glyf and CFF glyphs (the scaled bounding box, floored
+#         and ceiled as hb_font_t::scale_glyph_extents does);
+#       - _hb_ot_shape_fallback_mark_position: for a font without GPOS, the marks of each
+#         cluster are placed around their base by class (above, below, left, right) from the
+#         glyphs' extents, and their advances zeroed.
+#
+#       FIXME: ligature components (the mark over a ligature's right component) are not
+#       tracked: a ligature counts as one component.
+#
+#==============================================================================================
+
+# mark: Modified combining classes =======================================================================
+
+## HarfBuzz's modified combining class of a mark (hb_unicode_funcs_t::modified_combining_class).
+func hb_modified_combining_class(u: u32) -> u8:
+    # Reorder SAKOT to ensure it comes after any tone marks.
+    if u == 0x1A60:
+        return 254
+    # Reorder PADMA to ensure it comes after any vowel marks.
+    if u == 0x0FC6:
+        return 254
+    # Reorder TSA -PHRU to reorder before U+0F74
+    if u == 0x0F39:
+        return 127
+    let ccc = hb_canonical_combining_class(u)
+    match ccc:
+        # Hebrew
+        10: return 22
+        11: return 15
+        12: return 16
+        13: return 17
+        14: return 23
+        15: return 18
+        16: return 19
+        17: return 20
+        18: return 21
+        19: return 14
+        20: return 24
+        21: return 12
+        22: return 25
+        23: return 13
+        24: return 10
+        25: return 11
+        26: return 26
+        # Arabic
+        27: return 28
+        28: return 29
+        29: return 30
+        30: return 31
+        31: return 32
+        32: return 33
+        33: return 27
+        34: return 34
+        35: return 35
+        # Syriac
+        36: return 36
+        # Telugu
+        84: return 4
+        91: return 5
+        # Thai
+        103: return 3
+        107: return 107
+        # Lao
+        118: return 118
+        122: return 122
+        # Tibetan
+        129: return 129
+        130: return 132
+        132: return 131
+        _: return ccc
+
+## recategorize_combining_class (hb-ot-shape-fallback.cc): the positioning class of a
+## non-spacing mark's modified combining class.
+func hb_recategorize_combining_class(u: u32, class: u8) -> u8:
+    var klass = class
+    if klass >= 200:
+        return klass
+
+    # Thai / Lao need some per-character work.
+    if (u & ~(u32)0xFF) == 0x0E00:
+        if klass == 0:
+            match u:
+                0x0E31, 0x0E34, 0x0E35, 0x0E36, 0x0E37, 0x0E47, 0x0E4C, 0x0E4D, 0x0E4E:
+                    klass = hb_ccc_above_right
+                0x0EB1, 0x0EB4, 0x0EB5, 0x0EB6, 0x0EB7, 0x0EBB, 0x0ECC, 0x0ECD:
+                    klass = hb_ccc_above
+                0x0EBC:
+                    klass = hb_ccc_below
+                _:
+                    klass = klass
+        elif u == 0x0E3A:
+            # Thai virama is below-right
+            klass = hb_ccc_below_right
+
+    match klass:
+        # Hebrew
+        22, 15, 16, 17, 23, 18, 19, 20, 21, 24, 25:
+            return hb_ccc_below
+        13:
+            return hb_ccc_attached_above
+        10:
+            return hb_ccc_above_right
+        11, 14:
+            return hb_ccc_above_left
+        26:
+            return hb_ccc_above
+        12:
+            return klass
+        # Arabic and Syriac
+        28, 29, 31, 32, 27, 34, 35, 36:
+            return hb_ccc_above
+        30, 33:
+            return hb_ccc_below
+        # Thai
+        3:
+            return hb_ccc_below_right
+        107:
+            return hb_ccc_above_right
+        # Lao
+        118:
+            return hb_ccc_below
+        122:
+            return hb_ccc_above
+        # Tibetan
+        129:
+            return hb_ccc_below
+        132:
+            return hb_ccc_above
+        131:
+            return hb_ccc_below
+        _:
+            return klass
+
+# The positioning classes (hb_unicode_combining_class_t).
+let hb_ccc_attached_below_left: u8 = 200
+let hb_ccc_attached_below: u8 = 202
+let hb_ccc_attached_above: u8 = 214
+let hb_ccc_attached_above_right: u8 = 216
+let hb_ccc_below_left: u8 = 218
+let hb_ccc_below: u8 = 220
+let hb_ccc_below_right: u8 = 222
+let hb_ccc_left: u8 = 224
+let hb_ccc_right: u8 = 226
+let hb_ccc_above_left: u8 = 228
+let hb_ccc_above: u8 = 230
+let hb_ccc_above_right: u8 = 232
+let hb_ccc_double_below: u8 = 233
+let hb_ccc_double_above: u8 = 234
+
+# mark: Glyph extents ===========================================================================
+
+## hb_glyph_extents_t.
+struct HbGlyphExtents:
+    var x_bearing: i32
+    var y_bearing: i32
+    var width: i32
+    var height: i32
+
+## hb_font_t::scale_glyph_extents of font-unit extents.
+func hb_scale_glyph_extents(font: const HbFontT*, x_bearing: i32, y_bearing: i32, width: i32, height: i32) -> HbGlyphExtents:
+    let upem = (f32)hb_face_units_per_em(font.face)
+    let x_multf = (f32)font.x_scale / upem
+    let y_multf = (f32)font.y_scale / upem
+    let x1 = (f32)x_bearing * x_multf
+    let y1 = (f32)y_bearing * y_multf
+    let x2 = (f32)(x_bearing + width) * x_multf
+    let y2 = (f32)(y_bearing + height) * y_multf
+    let scaled_x_bearing = (i32)math32.floor(x1)
+    let scaled_y_bearing = (i32)math32.floor(y1)
+    return HbGlyphExtents(
+        x_bearing = scaled_x_bearing,
+        y_bearing = scaled_y_bearing,
+        width = (i32)math32.ceil(x2) - scaled_x_bearing,
+        height = (i32)math32.ceil(y2) - scaled_y_bearing)
+
+## hb_font_get_glyph_extents (glyf: the glyph header's box with the hmtx left side bearing;
+## CFF: the rounded bounds of the charstring's points), or none.
+func hb_font_get_glyph_extents(font: const HbFontT*, glyph: u32) -> HbGlyphExtents?:
+    let face = font.face.face else return none
+    if glyph >= (u32)face.num_glyphs:
+        return none
+    if face.outline_format == opentype.SfntOutlineFormat.true_type:
+        let range = opentype.sfnt_glyf_range(face, glyph) else return HbGlyphExtents()
+        if range.1 - range.0 < 10 or opentype.sfnt_i16(face.glyf, range.0) == 0:
+            # Empty glyph; zero extents.
+            return HbGlyphExtents()
+        let x_min = (i32)opentype.sfnt_i16(face.glyf, range.0 + 2)
+        let y_min = (i32)opentype.sfnt_i16(face.glyf, range.0 + 4)
+        let x_max = (i32)opentype.sfnt_i16(face.glyf, range.0 + 6)
+        let y_max = (i32)opentype.sfnt_i16(face.glyf, range.0 + 8)
+        # Undocumented rasterizer behavior: shift glyph to the left by (lsb - xMin), i.e., xMin = lsb
+        let lsb = (i32)opentype.sfnt_face_left_side_bearing(face, glyph)
+        let low_y = y_min if y_min < y_max else y_max
+        let high_y = y_max if y_min < y_max else y_min
+        let low_x = x_min if x_min < x_max else x_max
+        let high_x = x_max if x_min < x_max else x_min
+        return hb_scale_glyph_extents(font, lsb, high_y, high_x - low_x, low_y - high_y)
+    if face.outline_format == opentype.SfntOutlineFormat.cff:
+        var outline: opentype.SfntOutline
+        defer outline.release()
+        opentype.sfnt_cff_load_glyph(face, glyph, 65536, &outline) else return none
+        let count = outline.xs.length()
+        if count == 0:
+            return hb_scale_glyph_extents(font, 0, 0, 0, 0)
+        var min_x = *outline.xs.at(0)
+        var max_x = min_x
+        var min_y = *outline.ys.at(0)
+        var max_y = min_y
+        for index in 0..<count:
+            let x = *outline.xs.at(index)
+            let y = *outline.ys.at(index)
+            if x < min_x:
+                min_x = x
+            if x > max_x:
+                max_x = x
+            if y < min_y:
+                min_y = y
+            if y > max_y:
+                max_y = y
+        var x_bearing: i64 = 0
+        var width: i64 = 0
+        if min_x < max_x:
+            x_bearing = min_x
+            width = max_x - min_x
+        var y_bearing: i64 = 0
+        var height: i64 = 0
+        if min_y < max_y:
+            y_bearing = max_y
+            height = min_y - max_y
+        return hb_scale_glyph_extents(font, (i32)x_bearing, (i32)y_bearing, (i32)width, (i32)height)
+    return none
+
+# mark: Fallback mark positioning ===============================================================
+
+## _hb_glyph_info_is_unicode_mark: a mark by general category.
+func hb_is_unicode_mark(info: const HbGlyphInfo*) -> bool:
+    return hb_is_mark(info.character)
+
+## zero_mark_advances: the non-spacing marks of [start, end) lose their advance.
+func hb_zero_mark_advances(buffer: HbBufferT*, start: usize, end: usize, adjust_offsets_when_zeroing: bool):
+    let infos = buffer.infos.view()
+    let positions = buffer.positions.view()
+    for i in start..<end:
+        if infos[i].is_nonspacing_mark:
+            if adjust_offsets_when_zeroing:
+                positions[i].x_offset -= positions[i].x_advance
+                positions[i].y_offset -= positions[i].y_advance
+            positions[i].x_advance = 0
+            positions[i].y_advance = 0
+
+## position_mark: the offsets of the mark at `i` around the base's extents, by class.
+func hb_position_mark(font: const HbFontT*, buffer: HbBufferT*, base_extents: HbGlyphExtents*, i: usize, combining_class: u8):
+    let mark_extents = hb_font_get_glyph_extents(font, buffer.infos.at(i).codepoint) else return
+
+    let y_gap = font.y_scale // 16
+
+    let pos = buffer.positions.at(i)
+    pos.x_offset = 0
+    pos.y_offset = 0
+
+    # We don't position LEFT and RIGHT marks.
+
+    # X positioning
+    let klass = combining_class
+    if (klass == hb_ccc_double_below or klass == hb_ccc_double_above) and buffer.direction == HbDirection.ltr:
+        pos.x_offset += base_extents.x_bearing + base_extents.width - mark_extents.width // 2 - mark_extents.x_bearing
+    elif (klass == hb_ccc_double_below or klass == hb_ccc_double_above) and buffer.direction == HbDirection.rtl:
+        pos.x_offset += base_extents.x_bearing - mark_extents.width // 2 - mark_extents.x_bearing
+    elif klass == hb_ccc_attached_below_left or klass == hb_ccc_below_left or klass == hb_ccc_above_left:
+        # Left align.
+        pos.x_offset += base_extents.x_bearing - mark_extents.x_bearing
+    elif klass == hb_ccc_attached_above_right or klass == hb_ccc_below_right or klass == hb_ccc_above_right:
+        # Right align.
+        pos.x_offset += base_extents.x_bearing + base_extents.width - mark_extents.width - mark_extents.x_bearing
+    else:
+        # Center align.
+        pos.x_offset += base_extents.x_bearing + (base_extents.width - mark_extents.width) // 2 - mark_extents.x_bearing
+
+    # Y positioning
+    if klass == hb_ccc_double_below or klass == hb_ccc_below_left or klass == hb_ccc_below or klass == hb_ccc_below_right or klass == hb_ccc_attached_below_left or klass == hb_ccc_attached_below:
+        if klass != hb_ccc_attached_below_left and klass != hb_ccc_attached_below:
+            # Add gap, fall-through.
+            base_extents.height -= y_gap
+        pos.y_offset = base_extents.y_bearing + base_extents.height - mark_extents.y_bearing
+        # Never shift up "below" marks.
+        if (y_gap > 0) == (pos.y_offset > 0):
+            base_extents.height -= pos.y_offset
+            pos.y_offset = 0
+        base_extents.height += mark_extents.height
+    elif klass == hb_ccc_double_above or klass == hb_ccc_above_left or klass == hb_ccc_above or klass == hb_ccc_above_right or klass == hb_ccc_attached_above or klass == hb_ccc_attached_above_right:
+        if klass != hb_ccc_attached_above and klass != hb_ccc_attached_above_right:
+            # Add gap, fall-through.
+            base_extents.y_bearing += y_gap
+            base_extents.height -= y_gap
+        pos.y_offset = base_extents.y_bearing - (mark_extents.y_bearing + mark_extents.height)
+        # Don't shift down "above" marks too much.
+        if (y_gap > 0) != (pos.y_offset > 0):
+            let correction = -pos.y_offset // 2
+            base_extents.y_bearing += correction
+            base_extents.height -= correction
+            pos.y_offset += correction
+        base_extents.y_bearing -= mark_extents.height
+        base_extents.height += mark_extents.height
+
+## position_around_base: the marks of [base + 1, end) around the base.
+func hb_position_around_base(font: const HbFontT*, buffer: HbBufferT*, base: usize, end: usize, adjust_offsets_when_zeroing: bool):
+    let extents = hb_font_get_glyph_extents(font, buffer.infos.at(base).codepoint)
+    if extents == none:
+        # If extents don't work, zero marks and go home.
+        hb_zero_mark_advances(buffer, base + 1, end, adjust_offsets_when_zeroing)
+        return
+    var base_extents = extents else return
+    base_extents.y_bearing += buffer.positions.at(base).y_offset
+    # Use horizontal advance for horizontal positioning.
+    # Generally a better idea.  Also works for zero-ink glyphs.  See:
+    # https://github.com/harfbuzz/harfbuzz/issues/1532
+    base_extents.x_bearing = 0
+    base_extents.width = hb_font_get_glyph_h_advance(font, buffer.infos.at(base).codepoint)
+
+    var x_offset: i32 = 0
+    var y_offset: i32 = 0
+    if buffer.direction != HbDirection.rtl:
+        x_offset -= buffer.positions.at(base).x_advance
+        y_offset -= buffer.positions.at(base).y_advance
+
+    var last_combining_class: u16 = 255
+    var cluster_extents = base_extents
+    for i in base + 1..<end:
+        let this_combining_class = buffer.infos.at(i).combining_class
+        if this_combining_class != 0:
+            if last_combining_class != (u16)this_combining_class:
+                last_combining_class = (u16)this_combining_class
+                cluster_extents = base_extents
+
+            hb_position_mark(font, buffer, &cluster_extents, i, this_combining_class)
+
+            let pos = buffer.positions.at(i)
+            pos.x_advance = 0
+            pos.y_advance = 0
+            pos.x_offset += x_offset
+            pos.y_offset += y_offset
+        else:
+            let pos = buffer.positions.at(i)
+            if buffer.direction != HbDirection.rtl:
+                x_offset -= pos.x_advance
+                y_offset -= pos.y_advance
+            else:
+                x_offset += pos.x_advance
+                y_offset += pos.y_advance
+
+## position_cluster: each base of [start, end) with the marks after it.
+func hb_position_cluster(font: const HbFontT*, buffer: HbBufferT*, start: usize, end: usize, adjust_offsets_when_zeroing: bool):
+    if end - start < 2:
+        return
+    # Find the base glyph
+    var i = start
+    while i < end:
+        if not hb_is_unicode_mark(buffer.infos.at(i)):
+            # Find mark glyphs
+            var j = i + 1
+            while j < end and hb_is_unicode_mark(buffer.infos.at(j)):
+                j += 1
+            hb_position_around_base(font, buffer, i, j, adjust_offsets_when_zeroing)
+            i = j - 1
+        i += 1
+
+## _hb_ot_shape_fallback_mark_position.
+func hb_fallback_mark_position(font: const HbFontT*, buffer: HbBufferT*, adjust_offsets_when_zeroing: bool):
+    var start: usize = 0
+    let count = buffer.infos.length()
+    for i in 1..<count:
+        if not hb_is_unicode_mark(buffer.infos.at(i)):
+            hb_position_cluster(font, buffer, start, i, adjust_offsets_when_zeroing)
+            start = i
+    hb_position_cluster(font, buffer, start, count, adjust_offsets_when_zeroing)

@@ -1,0 +1,169 @@
+#==============================================================================================
+#
+#   woff - WOFF and WOFF2: unwrapping a web font into the sfnt font it carries
+#
+#   DESCRIPTION:
+#       WOFF 1.0 as Ladybird's loader reads it (Libraries/LibGfx/Font/WOFF/Loader.cpp, with
+#       its checks and messages): the header and table directory are validated, each table
+#       is inflated (zlib, through luce-compress's flate module) or copied into an sfnt of
+#       the declared total size, behind a rebuilt table directory. A zlib stream that does
+#       not fill its table exactly fails, like the donor's size check.
+#
+#       WOFF2 needs a Brotli decoder (Google's woff2 library in Ladybird), which the Luce
+#       ecosystem does not have yet: woff2_to_sfnt fails.
+#
+#==============================================================================================
+
+## The WOFF signature, 'wOFF'.
+pub let woff_signature: u32 = 0x774f4646
+
+## The WOFF2 signature, 'wOF2'.
+pub let woff2_signature: u32 = 0x774f4632
+
+# The sizes of the WOFF header and table directory entry, and of the sfnt table directory and
+# table record they become.
+let woff_header_size: usize = 44
+let woff_entry_size: usize = 20
+let sfnt_directory_size: usize = 12
+let sfnt_record_size: usize = 16
+
+## WOFF::pow_2_less_than_or_equal: the smallest power of two at or above `x` (1..32768),
+## as the donor computes it with count_leading_zeroes_safe.
+func woff_pow_2_less_than_or_equal(x: u16) -> u16:
+    assert(x > 0)
+    assert(x < 32769)
+    var leading: u32 = 16
+    let value = x - 1
+    if value != 0:
+        leading = 0
+        var bit: u16 = 0x8000
+        while (value & bit) == 0:
+            leading += 1
+            bit >>= 1
+    return (u16)(1 << (16 - leading))
+
+## The floor of log2 of a non-zero `value` (AK::log2).
+func woff_log2(value: u16) -> u16:
+    var result: u16 = 0
+    var rest = value
+    while rest > 1:
+        rest >>= 1
+        result += 1
+    return result
+
+## Writes `value` big-endian at `offset` of `data`.
+func woff_put_u16(data: u8[], offset: usize, value: u16):
+    data[offset] = (u8)(value >> 8)
+    data[offset + 1] = (u8)(value & 0xFF)
+
+## Writes `value` big-endian at `offset` of `data`.
+func woff_put_u32(data: u8[], offset: usize, value: u32):
+    data[offset] = (u8)(value >> 24)
+    data[offset + 1] = (u8)((value >> 16) & 0xFF)
+    data[offset + 2] = (u8)((value >> 8) & 0xFF)
+    data[offset + 3] = (u8)(value & 0xFF)
+
+## The sfnt font that the WOFF file `buffer` wraps, allocated in the current allocator (free
+## it there). Fails with invalid_font for a malformed file (WOFF::try_load_from_bytes).
+pub func woff_to_sfnt(buffer: const u8[]) -> u8[]!:
+    if buffer.length < woff_header_size:
+        error(invalid_font, "Truncated WOFF header")
+
+    # The signature field in the WOFF header MUST contain the "magic number" 0x774F4646. If
+    # the field does not contain this value, user agents MUST reject the file as invalid.
+    if sfnt_u32(buffer, 0) != woff_signature:
+        error(invalid_font, "Invalid WOFF signature")
+    # The flavor field corresponds to the "sfnt version" field found at the beginning of an
+    # sfnt file. It is not an error in the WOFF file if it holds another value than
+    # 0x00010000 or 'OTTO' (whether that font loads is the sfnt reader's business).
+    let flavor = sfnt_u32(buffer, 4)
+    let length = sfnt_u32(buffer, 8)
+    let num_tables = sfnt_u16(buffer, 12)
+    let reserved = sfnt_u16(buffer, 14)
+    let total_sfnt_size = sfnt_u32(buffer, 16)
+    let meta_offset = sfnt_u32(buffer, 24)
+    let meta_length = sfnt_u32(buffer, 28)
+    let priv_offset = sfnt_u32(buffer, 36)
+    let priv_length = sfnt_u32(buffer, 40)
+
+    var expected_total_sfnt_size: usize = sfnt_directory_size + (usize)num_tables * sfnt_record_size
+    if (usize)length > buffer.length:
+        error(invalid_font, "Invalid WOFF length")
+    if num_tables == 0 or num_tables > 0xFFFF // 16:
+        error(invalid_font, "Invalid WOFF numTables")
+    if reserved != 0:
+        error(invalid_font, "Invalid WOFF reserved field")
+    if meta_length == 0 and meta_offset != 0:
+        error(invalid_font, "Invalid WOFF meta block offset")
+    if priv_length == 0 and priv_offset != 0:
+        error(invalid_font, "Invalid WOFF private block offset")
+    if woff_header_size + (usize)num_tables * woff_entry_size > (usize)length:
+        error(invalid_font, "Truncated WOFF table directory")
+    if (usize)total_sfnt_size < expected_total_sfnt_size:
+        error(invalid_font, "Invalid WOFF total sfnt size")
+    if (u64)total_sfnt_size > 10 * 1024 * 1024:
+        error(invalid_font, "Uncompressed font is more than 10 MiB")
+    let font_buffer = try new u8[(usize)total_sfnt_size]
+    errdefer free(font_buffer)
+
+    # The sfnt table directory.
+    let search_range = woff_pow_2_less_than_or_equal(num_tables)
+    woff_put_u32(font_buffer, 0, flavor)
+    woff_put_u16(font_buffer, 4, num_tables)
+    woff_put_u16(font_buffer, 6, search_range *% 16)
+    woff_put_u16(font_buffer, 8, woff_log2(search_range))
+    woff_put_u16(font_buffer, 10, num_tables *% 16 -% search_range *% 16)
+
+    var font_buffer_offset: usize = sfnt_directory_size + (usize)num_tables * sfnt_record_size
+    for i in 0..<(usize)num_tables:
+        let entry = woff_header_size + i * woff_entry_size
+        let tag = sfnt_u32(buffer, entry)
+        let entry_offset = (usize)sfnt_u32(buffer, entry + 4)
+        let comp_length = (usize)sfnt_u32(buffer, entry + 8)
+        let orig_length = (usize)sfnt_u32(buffer, entry + 12)
+        let orig_checksum = sfnt_u32(buffer, entry + 16)
+
+        expected_total_sfnt_size += (orig_length + 3) & 0xFFFFFFFC
+        if expected_total_sfnt_size > (usize)total_sfnt_size:
+            error(invalid_font, "Invalid WOFF total sfnt size")
+        if entry_offset + comp_length > (usize)length:
+            error(invalid_font, "Truncated WOFF table")
+        if font_buffer_offset + orig_length > font_buffer.length:
+            error(invalid_font, "Uncompressed WOFF table too big")
+        if comp_length < orig_length:
+            let compressed = buffer[entry_offset..<entry_offset + comp_length]
+            let destination = font_buffer[font_buffer_offset..<font_buffer_offset + orig_length]
+            # ZlibDecompressor::read_until_eof, then the size check: inflating into exactly
+            # the table's size fails for a stream of another length.
+            let consumed = flate.inflate_zlib(compressed, destination) catch:
+                error(invalid_font, "Invalid decompressed WOFF table length")
+            discard(consumed)
+        else:
+            if comp_length != orig_length:
+                error(invalid_font, "Invalid uncompressed WOFF table length")
+            memory.copy(font_buffer[font_buffer_offset..], buffer[entry_offset..], orig_length)
+
+        # The table's record.
+        let record = sfnt_directory_size + i * sfnt_record_size
+        woff_put_u32(font_buffer, record, tag)
+        woff_put_u32(font_buffer, record + 4, orig_checksum)
+        woff_put_u32(font_buffer, record + 8, (u32)font_buffer_offset)
+        woff_put_u32(font_buffer, record + 12, (u32)orig_length)
+
+        font_buffer_offset += orig_length
+
+    if (usize)total_sfnt_size != expected_total_sfnt_size:
+        error(invalid_font, "Invalid WOFF total sfnt size")
+    return font_buffer
+
+## The sfnt font that the WOFF2 file `buffer` wraps. FIXME: WOFF2 tables are Brotli-compressed
+## and there is no Luce Brotli decoder yet, so this always fails (after the signature check).
+pub func woff2_to_sfnt(buffer: const u8[]) -> u8[]!:
+    if sfnt_u32(buffer, 0) != woff2_signature:
+        error(invalid_font, "Invalid WOFF2 signature")
+    error(invalid_font, "Failed to convert the WOFF2 font to TTF")
+
+## Whether `buffer` starts with the signature of a WOFF or WOFF2 file.
+pub func woff_is_web_font(buffer: const u8[]) -> bool:
+    let signature = sfnt_u32(buffer, 0)
+    return signature == woff_signature or signature == woff2_signature

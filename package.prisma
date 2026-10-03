@@ -1,17 +1,23 @@
 #prisma 4.0
 def package "luce-fonts" {
     str owner = "dymokomi"
-    str version = "0.3.1"
+    str version = "0.3.2"
     str kind = "package"
     str language = "luce-base"
-    str description = "Native fonts for Luce: installed families and styles, proportional type set in paragraphs (wrapped, aligned, tracked, led) and monospace code faces. CoreText on macOS, GDI on Windows, cairo on Linux."
+    str description = "Fonts for Luce: native installed families and styles, proportional type set in paragraphs and monospace code faces (CoreText, GDI, cairo), and a portable OpenType engine: sfnt/CFF/WOFF font files, FreeType-exact metrics and outlines, and HarfBuzz-style shaping."
     str readme = "README.md"
-    str[] public = ["fonts"]
+    str[] public = ["fonts", "opentype", "shaping"]
 
     def dependency "luce-std" {
         str owner = "dymokomi"
         str version = "^0.2.0"
         str path = "../luce-std"
+    }
+
+    def dependency "luce-compress" {
+        str owner = "dymokomi"
+        str version = "^0.4.0"
+        str path = "../luce-compress"
     }
 
     def native "macos" {

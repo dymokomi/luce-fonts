@@ -1,0 +1,23 @@
+#==============================================================================================
+#
+#   shaping - text shaping: characters to positioned glyphs, as HarfBuzz's default shaper
+#
+#   DESCRIPTION:
+#       HarfBuzz's API over the `opentype` reader, in Luce: a buffer of characters is mapped
+#       through the cmap with Unicode normalization, substituted by GSUB (ligatures,
+#       contextual forms, the font's features), positioned by GPOS or the legacy kern table
+#       (pair kerning, mark attachment, AAT tracking), with HarfBuzz's fallback spaces and
+#       fallback mark positioning, clusters and right-to-left runs. The numbers match
+#       HarfBuzz 10.2's for the default shaper; the complex-script shapers (Arabic joining,
+#       Indic, USE, Thai, Hangul) are not implemented (see the fragments' FIXMEs).
+#
+#       Usage: hb_font_create(hb_face_create(hb_blob_create(bytes), 0)), hb_font_set_scale,
+#       then per run hb_buffer_create, hb_buffer_add_utf16 (or _ascii), hb_buffer_set_direction
+#       or hb_buffer_guess_segment_properties, hb_shape, and the infos and positions.
+#
+#==============================================================================================
+
+import c
+import memory
+from luce_std import files, math32, unicode
+import opentype

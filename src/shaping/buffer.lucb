@@ -1,0 +1,517 @@
+#==============================================================================================
+#
+#   buffer - the shaping buffer and the shaping driver that replace HarfBuzz
+#
+#   DESCRIPTION:
+#       Written for the Luce port of Ladybird, which shapes with HarfBuzz
+#       (hb_buffer_add_utf8/utf16, hb_buffer_guess_segment_properties, hb_shape); this fragment and layout.lucb do the part of HarfBuzz's OpenType shaper
+#       (hb-ot-shape.cc) that a Latin-style "default" shaper does, in HarfBuzz's order:
+#
+#       1. the code points of the text with their clusters (UTF-8 byte offsets for ASCII
+#          text, UTF-16 code unit offsets otherwise, as the two add functions give them);
+#       2. mapping to glyphs through the cmap, with HarfBuzz's normalizer (normalize.lucb):
+#          decomposition of what the font lacks, the space fallbacks and U+2011 as U+2010,
+#          canonical reordering of marks and recomposition;
+#       3. GSUB with the default features (ccmp, locl, rlig, calt, clig, liga, rclt, ...)
+#          and the font's shape features;
+#       4. hiding default-ignorable characters behind the space glyph;
+#       5. advances scaled as hb_font_t scales them (em_mult: (v * mult + 32768) >> 16 with
+#          mult = (scale << 16) / upem), GPOS (or the legacy kern table), zero-width marks,
+#          the space fallback widths; and the reversal of right-to-left runs.
+#
+#       FIXME: the complex shapers (Arabic joining, Indic, Khmer, Myanmar, USE, Hangul,
+#       Thai), mark positioning without GPOS (HarfBuzz's fallback mark positioning), AAT
+#       tables, variation-selector handling and vertical text are not implemented.
+#
+#==============================================================================================
+
+# mark: Blobs, faces, fonts and buffers ===========================================================
+
+## hb_blob_t: borrowed font bytes.
+pub struct HbBlobT:
+    pub var data: const u8[]
+
+## hb_face_t: the parsed face, none when the bytes are not a font (HarfBuzz's empty face).
+pub struct HbFaceT:
+    pub var face: opentype.SfntFace*?
+
+## hb_font_t: the face, the scale and hb_font_t's em multipliers, the point size and the
+## variation coordinates.
+pub struct HbFontT:
+    pub var face: HbFaceT*
+    pub var x_scale: i32
+    pub var y_scale: i32
+    pub var x_mult: i64
+    pub var y_mult: i64
+    pub var ptem: f32
+    pub var variations: opentype.List[HbVariation]
+
+## hb_buffer_t: the glyph infos and positions, the direction and the script of the text (its
+## ISO 15924 code as a tag, 'Latn'; 0 while unset), and the allocator it was made with.
+pub struct HbBufferT:
+    pub var infos: opentype.List[HbGlyphInfo]
+    pub var positions: opentype.List[HbGlyphPosition]
+    pub var direction: HbDirection
+    pub var script: u32
+    var allocator: memory.Allocator
+
+# mark: The buffer ==============================================================================
+
+## hb_direction_t, horizontal only.
+pub enum HbDirection as u8:
+    invalid = 0
+    ltr = 4
+    rtl = 5
+
+## hb_glyph_info_t with the per-glyph properties HarfBuzz keeps in its private var fields.
+pub struct HbGlyphInfo:
+    ## The character before mapping, the glyph id after it (HarfBuzz's `codepoint`).
+    pub var codepoint: u32
+    ## The offset of the glyph's first character in the input, in the input's units.
+    pub var cluster: u32
+    ## The character the glyph came from (for the unicode properties).
+    pub var character: u32
+    ## GDEF glyph class: 0 unclassified, 1 base, 2 ligature, 3 mark, 4 component.
+    pub var glyph_class: u8
+    pub var is_default_ignorable: bool
+    pub var is_zwj: bool
+    pub var is_zwnj: bool
+    ## hb_unicode_funcs_t::space_t of a space mapped to the space glyph (0: not a fallback).
+    pub var space_fallback: u8
+    pub var substituted: bool
+    pub var ligated: bool
+    ## HarfBuzz's modified combining class of a mark (0 for anything else), recategorized
+    ## for positioning when fallback mark positioning applies.
+    pub var combining_class: u8
+    ## Whether the character is a non-spacing mark (general category Mn).
+    pub var is_nonspacing_mark: bool
+    ## Whether the character continues the grapheme before it (UPROPS_MASK_CONTINUATION).
+    pub var is_continuation: bool
+
+## hb_glyph_position_t, in the font's scale (pixel size × 64 for Gfx::Font), with the
+## attachment HarfBuzz keeps in its private var field while positioning.
+pub struct HbGlyphPosition:
+    pub var x_advance: i32
+    pub var y_advance: i32
+    pub var x_offset: i32
+    pub var y_offset: i32
+    pub var attach_chain: i32
+    pub var attach_type: u8
+
+## GPOS_impl::ATTACH_TYPE_MARK.
+let hb_attach_type_mark: u8 = 1
+
+## hb_buffer_create, in the current allocator (hb_buffer_destroy frees it there).
+pub func hb_buffer_create() -> HbBufferT*:
+    return new HbBufferT(direction = HbDirection.invalid, allocator = memory.allocator) else trap("out of memory")
+
+## A copy of `buffer` (its glyphs, positions, direction and script) from the current allocator.
+## (An addition: a cache can keep a copy of what was shaped in its own allocator.)
+pub func hb_buffer_copy(buffer: const HbBufferT*) -> HbBufferT*:
+    return new HbBufferT(infos = buffer.infos.clone(), positions = buffer.positions.clone(), direction = buffer.direction, script = buffer.script, allocator = memory.allocator) else trap("out of memory")
+
+## hb_buffer_add: one character with its cluster.
+func hb_buffer_add(buffer: HbBufferT*, code_point: u32, cluster: u32):
+    buffer.infos.push(HbGlyphInfo(codepoint = code_point, cluster = cluster, character = code_point))
+
+## hb_buffer_add_utf8 with the whole text as the item: each byte is an ASCII character whose
+## cluster is its byte offset. (Gfx::setup_text_shaping only passes ASCII storage here.)
+pub func hb_buffer_add_ascii(buffer: HbBufferT*, text: const u8[]):
+    for (index, byte) in text.indexed():
+        # Anything that is not ASCII is an invalid UTF-8 sequence: U+FFFD, as HarfBuzz decodes it.
+        let code_point: u32 = (u32)byte if byte < 0x80 else 0xFFFD
+        hb_buffer_add(buffer, code_point, (u32)index)
+
+## hb_buffer_add_utf16 with the whole text as the item: clusters are code unit offsets and
+## unpaired surrogates become U+FFFD.
+pub func hb_buffer_add_utf16(buffer: HbBufferT*, text: const u16[]):
+    var index: usize = 0
+    while index < text.length:
+        let code_unit = (u32)text[index]
+        var code_point = code_unit
+        var length: usize = 1
+        if code_unit >= 0xD800 and code_unit <= 0xDBFF:
+            if index + 1 < text.length and (u32)text[index + 1] >= 0xDC00 and (u32)text[index + 1] <= 0xDFFF:
+                code_point = 0x10000 + ((code_unit - 0xD800) << 10) + ((u32)text[index + 1] - 0xDC00)
+                length = 2
+            else:
+                code_point = 0xFFFD
+        elif code_unit >= 0xDC00 and code_unit <= 0xDFFF:
+            code_point = 0xFFFD
+        hb_buffer_add(buffer, code_point, (u32)index)
+        index += length
+
+## hb_buffer_set_direction.
+pub func hb_buffer_set_direction(buffer: HbBufferT*, direction: HbDirection):
+    buffer.direction = direction
+
+## hb_script_get_horizontal_direction: right-to-left scripts, scripts written either way
+## (invalid) and left-to-right for the rest.
+func hb_script_get_horizontal_direction(script: u32) -> HbDirection:
+    let right_to_left: str[35] = ["Arab", "Hebr", "Syrc", "Thaa", "Cprt", "Khar", "Phnx", "Nkoo", "Lydi", "Avst", "Armi", "Phli", "Prti", "Sarb", "Orkh", "Samr", "Mand", "Merc", "Mero", "Mani", "Mend", "Nbat", "Narb", "Palm", "Phlp", "Hatr", "Adlm", "Rohg", "Sogo", "Sogd", "Elym", "Chrs", "Yezi", "Ougr", "Gara"]
+    for code in right_to_left:
+        let bytes = code.bytes
+        if script == opentype.sfnt_tag(bytes[0], bytes[1], bytes[2], bytes[3]):
+            return HbDirection.rtl
+    let either: str[4] = ["Hung", "Ital", "Runr", "Tfng"]
+    for code in either:
+        let bytes = code.bytes
+        if script == opentype.sfnt_tag(bytes[0], bytes[1], bytes[2], bytes[3]):
+            return HbDirection.invalid
+    return HbDirection.ltr
+
+## hb_buffer_guess_segment_properties: the script of the first character that has one, and
+## the direction of that script when none is set (left to right when the script has none).
+pub func hb_buffer_guess_segment_properties(buffer: HbBufferT*):
+    # If script is not set, guess from buffer contents
+    if buffer.script == 0:
+        for info in buffer.infos.view():
+            let script = hb_script_of(info.character)
+            if script != 0:
+                buffer.script = script
+                break
+    # If direction is unset, guess it from script
+    if buffer.direction == HbDirection.invalid:
+        buffer.direction = hb_script_get_horizontal_direction(buffer.script)
+        if buffer.direction == HbDirection.invalid:
+            buffer.direction = HbDirection.ltr
+
+## hb_buffer_get_glyph_infos.
+pub func hb_buffer_get_glyph_infos(buffer: const HbBufferT*) -> const HbGlyphInfo[]:
+    return buffer.infos.view()
+
+## hb_buffer_get_glyph_positions.
+pub func hb_buffer_get_glyph_positions(buffer: const HbBufferT*) -> const HbGlyphPosition[]:
+    return buffer.positions.view()
+
+## hb_buffer_destroy: frees the buffer and its glyphs with the allocator it was made with.
+pub func hb_buffer_destroy(buffer: HbBufferT*?):
+    let doomed = buffer else return
+    var allocator = doomed.allocator
+    doomed.infos.release()
+    doomed.positions.release()
+    free(doomed) in allocator
+
+# mark: The font =================================================================================
+
+## hb_font_create: a font at the face's own scale (upem).
+pub func hb_font_create(face: HbFaceT*) -> HbFontT*:
+    let font = new HbFontT(face = face) else trap("out of memory")
+    let upem: i32 = (i32)hb_face_units_per_em(face)
+    hb_font_set_scale(font, upem, upem)
+    return font
+
+## hb_font_set_scale and hb_font_t::mults_changed.
+pub func hb_font_set_scale(font: HbFontT*, x_scale: i32, y_scale: i32):
+    font.x_scale = x_scale
+    font.y_scale = y_scale
+    let upem = (i64)hb_face_units_per_em(font.face)
+    font.x_mult = -(((i64)-x_scale << 16) // upem) if x_scale < 0 else ((i64)x_scale << 16) // upem
+    font.y_mult = -(((i64)-y_scale << 16) // upem) if y_scale < 0 else ((i64)y_scale << 16) // upem
+
+## hb_font_set_ptem: only AAT tracking reads it.
+pub func hb_font_set_ptem(font: HbFontT*, ptem: f32):
+    font.ptem = ptem
+
+## hb_font_set_variations. FIXME: variable fonts (fvar/gvar/HVAR) are not supported, so the
+## coordinates are only recorded.
+pub func hb_font_set_variations(font: HbFontT*, variations: const HbVariation[]):
+    font.variations.clear()
+    for variation in variations:
+        font.variations.push(variation)
+
+## hb_font_get_face.
+pub func hb_font_get_face(font: const HbFontT*) -> HbFaceT*:
+    return font.face
+
+## hb_font_t::em_mult: a font-unit value in the font's scale.
+func hb_font_em_scale_x(font: const HbFontT*, value: i16) -> i32:
+    return (i32)(((i64)value * font.x_mult + 32768) >> 16)
+
+## hb_font_get_nominal_glyph: the cmap glyph of a character, if there is one.
+pub func hb_font_get_nominal_glyph(font: const HbFontT*, code_point: u32) -> u32?:
+    let face = font.face.face else return none
+    let glyph = opentype.sfnt_face_glyph_for_code_point(face, code_point)
+    if glyph == 0:
+        return none
+    return glyph
+
+## hb_font_get_glyph_h_advance: hmtx scaled (em_scale_x of the advance as an int16).
+pub func hb_font_get_glyph_h_advance(font: const HbFontT*, glyph: u32) -> i32:
+    let face = font.face.face else return 0
+    return hb_font_em_scale_x(font, (i16)opentype.sfnt_face_advance(face, glyph))
+
+# mark: The face =================================================================================
+
+## hb_blob_create over borrowed bytes (HB_MEMORY_MODE_READONLY).
+pub func hb_blob_create(data: const u8[]) -> HbBlobT*:
+    return new HbBlobT(data = data) else trap("out of memory")
+
+## hb_face_create: an empty face when the data is not a font, as HarfBuzz does.
+pub func hb_face_create(blob: HbBlobT*, index: u32) -> HbFaceT*:
+    let face: opentype.SfntFace*? = opentype.sfnt_face_create(blob.data, index) catch:
+        recover none
+    return new HbFaceT(face = face) else trap("out of memory")
+
+## hb_face_get_upem (1000 for an empty face, as HarfBuzz's default).
+func hb_face_units_per_em(face: const HbFaceT*) -> u16:
+    let sfnt = face.face else return 1000
+    return sfnt.units_per_em
+
+## hb_face_reference_table's length > 0.
+pub func hb_face_has_table_tag(face: const HbFaceT*, tag: u32) -> bool:
+    let sfnt = face.face else return false
+    return opentype.sfnt_face_has_table(sfnt, tag)
+
+# mark: Unicode properties HarfBuzz keeps ==============================================================
+
+## hb_unicode_funcs_t::is_default_ignorable (hb-unicode.hh).
+pub func hb_is_default_ignorable(ch: u32) -> bool:
+    let plane = ch >> 16
+    if plane == 0:
+        let page = ch >> 8
+        match page:
+            0x00: return ch == 0x00AD
+            0x03: return ch == 0x034F
+            0x06: return ch == 0x061C
+            0x17: return ch >= 0x17B4 and ch <= 0x17B5
+            0x18: return ch >= 0x180B and ch <= 0x180E
+            0x20: return (ch >= 0x200B and ch <= 0x200F) or (ch >= 0x202A and ch <= 0x202E) or (ch >= 0x2060 and ch <= 0x206F)
+            0xFE: return (ch >= 0xFE00 and ch <= 0xFE0F) or ch == 0xFEFF
+            0xFF: return ch >= 0xFFF0 and ch <= 0xFFF8
+            _: return false
+    match plane:
+        0x01: return ch >= 0x1D173 and ch <= 0x1D17A
+        0x0E: return ch >= 0xE0000 and ch <= 0xE0FFF
+        _: return false
+
+## hb_unicode_funcs_t::space_t.
+let hb_space_em: u8 = 1
+let hb_space_em_2: u8 = 2
+let hb_space_em_3: u8 = 3
+let hb_space_em_4: u8 = 4
+let hb_space_em_5: u8 = 5
+let hb_space_em_6: u8 = 6
+let hb_space_em_16: u8 = 16
+let hb_space_4_em_18: u8 = 17
+let hb_space: u8 = 18
+let hb_space_figure: u8 = 19
+let hb_space_punctuation: u8 = 20
+let hb_space_narrow: u8 = 21
+
+## hb_unicode_funcs_t::space_fallback_type: all GC=Zs chars that can use a fallback.
+func hb_space_fallback_type(u: u32) -> u8:
+    match u:
+        0x0020: return hb_space
+        0x00A0: return hb_space
+        0x2000: return hb_space_em_2
+        0x2001: return hb_space_em
+        0x2002: return hb_space_em_2
+        0x2003: return hb_space_em
+        0x2004: return hb_space_em_3
+        0x2005: return hb_space_em_4
+        0x2006: return hb_space_em_6
+        0x2007: return hb_space_figure
+        0x2008: return hb_space_punctuation
+        0x2009: return hb_space_em_5
+        0x200A: return hb_space_em_16
+        0x202F: return hb_space_narrow
+        0x205F: return hb_space_4_em_18
+        0x3000: return hb_space_em
+        _: return 0
+
+# mark: Shaping =================================================================================
+
+## hb_feature_t.
+pub struct HbFeature:
+    pub var tag: u32
+    pub var value: u32
+    pub var start: u32
+    pub var end: u32
+
+## HB_FEATURE_GLOBAL_END.
+pub let hb_feature_global_end: u32 = 0xFFFFFFFF
+
+## hb_variation_t.
+pub struct HbVariation:
+    pub var tag: u32
+    pub var value: f32
+
+## hb_shape: shapes the buffer's characters into positioned glyphs with the font.
+pub func hb_shape(font: HbFontT*, buffer: HbBufferT*, features: const HbFeature[]):
+    if buffer.direction == HbDirection.invalid:
+        hb_buffer_guess_segment_properties(buffer)
+    buffer.positions.clear()
+    if font.face.face == none:
+        # An empty face maps everything to glyph 0 with no advance.
+        let infos = buffer.infos.view()
+        for index in 0..<infos.length:
+            infos[index].codepoint = 0
+        buffer.positions.resize(buffer.infos.length())
+        return
+    let face = font.face.face else return
+    hb_set_unicode_props(buffer)
+    hb_form_clusters(buffer)
+    hb_normalize(font, buffer)
+    # Fallback mark positioning (a font without GPOS) recategorizes the non-spacing marks.
+    let fallback_mark_positioning = face.gpos.length == 0
+    if fallback_mark_positioning:
+        let infos = buffer.infos.view()
+        for index in 0..<infos.length:
+            if infos[index].is_nonspacing_mark:
+                infos[index].combining_class = hb_recategorize_combining_class(infos[index].character, infos[index].combining_class)
+    hb_set_glyph_classes(face, buffer)
+    var plan = hb_layout_plan(face, buffer, features)
+    defer plan.release()
+    hb_layout_substitute(face, font, &plan, buffer)
+    hb_hide_default_ignorables(font, buffer)
+    hb_position(font, face, &plan, buffer)
+    if buffer.direction == HbDirection.rtl:
+        hb_buffer_reverse(buffer)
+
+## hb_set_unicode_props: the properties HarfBuzz records per character.
+func hb_set_unicode_props(buffer: HbBufferT*):
+    let infos = buffer.infos.view()
+    for index in 0..<infos.length:
+        hb_info_set_unicode_props(&infos[index])
+
+## _hb_glyph_info_set_unicode_props for one character: default ignorable, joiner, the
+## modified combining class of a mark and whether it is non-spacing.
+func hb_info_set_unicode_props(info: HbGlyphInfo*):
+    let u = info.character
+    info.is_default_ignorable = hb_is_default_ignorable(u)
+    info.is_zwj = u == 0x200D
+    info.is_zwnj = u == 0x200C
+    info.combining_class = 0
+    info.is_nonspacing_mark = false
+    # Marks, joiners, emoji modifiers and tags continue a grapheme.
+    info.is_continuation = u == 0x200D or u == 0x200C or (u >= 0x1F3FB and u <= 0x1F3FF) or (u >= 0xE0020 and u <= 0xE007F)
+    if hb_is_mark(u):
+        info.combining_class = hb_modified_combining_class(u)
+        info.is_nonspacing_mark = hb_is_nonspacing_mark(u)
+        info.is_continuation = true
+
+## hb_form_clusters (HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES): a continuation character
+## (a mark, a joiner, an emoji modifier or tag) joins the cluster before it.
+func hb_form_clusters(buffer: HbBufferT*):
+    let infos = buffer.infos.view()
+    var index: usize = 1
+    while index < infos.length:
+        let u = infos[index].character
+        # An emoji after a zero width joiner continues the grapheme too (hb_set_unicode_props).
+        if infos[index - 1].character == 0x200D and hb_is_emoji(u):
+            infos[index].is_continuation = true
+        if infos[index].is_continuation:
+            infos[index].cluster = infos[index - 1].cluster
+        index += 1
+
+## hb_ot_hide_default_ignorables: default-ignorable characters that GSUB did not consume
+## become the space glyph (zero-advanced later), or are deleted when the font has no space.
+func hb_hide_default_ignorables(font: const HbFontT*, buffer: HbBufferT*):
+    var any = false
+    for info in buffer.infos.view():
+        if info.is_default_ignorable and not info.substituted:
+            any = true
+    if not any:
+        return
+    if let invisible = hb_font_get_nominal_glyph(font, 0x0020):
+        let infos = buffer.infos.view()
+        for index in 0..<infos.length:
+            if infos[index].is_default_ignorable and not infos[index].substituted:
+                infos[index].codepoint = invisible
+        return
+    var kept: opentype.List[HbGlyphInfo]
+    for info in buffer.infos.view():
+        if not (info.is_default_ignorable and not info.substituted):
+            kept.push(info)
+    buffer.infos.release()
+    buffer.infos = kept
+
+## hb_buffer_reverse.
+func hb_buffer_reverse(buffer: HbBufferT*):
+    let infos = buffer.infos.view()
+    let positions = buffer.positions.view()
+    let count = infos.length
+    var low: usize = 0
+    while low + 1 < count - low:
+        let high = count - 1 - low
+        let info = infos[low]
+        infos[low] = infos[high]
+        infos[high] = info
+        let position = positions[low]
+        positions[low] = positions[high]
+        positions[high] = position
+        low += 1
+
+## hb_ot_position: default advances and the space fallbacks, GPOS or kern, zero-width marks
+## and default ignorables, and the mark attachments.
+func hb_position(font: const HbFontT*, face: const opentype.SfntFace*, plan: const HbLayoutPlan*, buffer: HbBufferT*):
+    let count = buffer.infos.length()
+    buffer.positions.resize(count)
+    let infos = buffer.infos.view()
+    let positions = buffer.positions.view()
+    for index in 0..<count:
+        positions[index].x_advance = hb_font_get_glyph_h_advance(font, infos[index].codepoint)
+    # hb_ot_position_default ends with the space fallbacks.
+    hb_fallback_spaces(font, buffer)
+
+    hb_layout_position(font, face, plan, buffer)
+
+    # zero_mark_widths_by_gdef (the default shaper's HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_LATE).
+    # Without GPOS, HarfBuzz first moves the mark back by its advance
+    # (adjust_mark_positioning_when_zeroing, for forward text).
+    # FIXME: HarfBuzz then positions such marks over their base with the fallback mark
+    # positioning (hb-ot-shape-fallback.cc), which needs the glyph extents and the canonical
+    # combining classes; it is not implemented.
+    let adjust_offsets_when_zeroing = face.gpos.length == 0 and buffer.direction != HbDirection.rtl
+    for index in 0..<count:
+        if infos[index].glyph_class == 3:
+            if adjust_offsets_when_zeroing:
+                positions[index].x_offset -= positions[index].x_advance
+                positions[index].y_offset -= positions[index].y_advance
+            positions[index].x_advance = 0
+            positions[index].y_advance = 0
+
+    # hb_ot_zero_width_default_ignorables
+    for index in 0..<count:
+        if infos[index].is_default_ignorable and not infos[index].substituted:
+            positions[index].x_advance = 0
+            positions[index].y_advance = 0
+            positions[index].x_offset = 0
+            positions[index].y_offset = 0
+
+    hb_position_finish_offsets(buffer)
+
+    if face.gpos.length == 0:
+        hb_fallback_mark_position(font, buffer, adjust_offsets_when_zeroing)
+
+## _hb_ot_shape_fallback_spaces (hb-ot-shape-fallback.cc).
+func hb_fallback_spaces(font: const HbFontT*, buffer: HbBufferT*):
+    let infos = buffer.infos.view()
+    let positions = buffer.positions.view()
+    for index in 0..<infos.length:
+        let space_type = infos[index].space_fallback
+        if space_type == 0 or infos[index].ligated:
+            continue
+        if space_type == hb_space:
+            continue
+        if space_type <= hb_space_em_16:
+            positions[index].x_advance = (font.x_scale + (i32)space_type // 2) // (i32)space_type
+        elif space_type == hb_space_4_em_18:
+            positions[index].x_advance = (i32)((i64)font.x_scale * 4 // 18)
+        elif space_type == hb_space_figure:
+            var digit: u32 = (u32)'0'
+            while digit <= (u32)'9':
+                if let glyph = hb_font_get_nominal_glyph(font, digit):
+                    positions[index].x_advance = hb_font_get_glyph_h_advance(font, glyph)
+                    break
+                digit += 1
+        elif space_type == hb_space_punctuation:
+            var glyph = hb_font_get_nominal_glyph(font, (u32)'.')
+            if glyph == none:
+                glyph = hb_font_get_nominal_glyph(font, (u32)',')
+            if let found = glyph:
+                positions[index].x_advance = hb_font_get_glyph_h_advance(font, found)
+        elif space_type == hb_space_narrow:
+            # Half-space?
+            positions[index].x_advance = positions[index].x_advance // 2

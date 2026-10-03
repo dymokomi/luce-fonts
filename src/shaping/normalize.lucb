@@ -1,0 +1,166 @@
+#==============================================================================================
+#
+#   normalize - HarfBuzz's normalizer: mapping characters to glyphs with decomposition,
+#               the space fallbacks, canonical reordering of marks and recomposition
+#
+#   DESCRIPTION:
+#       HarfBuzz's hb-ot-shape-normalize.cc in the default shaper's composed-diacritics mode,
+#       which decides by the font's cmap:
+#
+#       1. decompose: a character the font has maps to its glyph; one it lacks is decomposed
+#          (canonically) when the font has every part; a space it lacks uses the space glyph
+#          with a fallback width; U+2011 falls back to U+2010; anything else is glyph 0;
+#       2. reorder: runs of marks are sorted stably by canonical combining class;
+#       3. recompose: a mark composes with the preceding starter when nothing between them
+#          blocks it and the font has a glyph for the composition.
+#
+#       The combining classes are HarfBuzz's modified ones (fallback.lucb), over luce-std's
+#       canonical classes; NFC of a starter and a mark (luce-std's normalizer) tells whether
+#       Unicode composes them. FIXME: HarfBuzz's decomposition of characters the font
+#       has partially (decompose() recursing on the first part) is not reproduced.
+#
+#==============================================================================================
+
+## The largest run of marks HarfBuzz reorders (HB_OT_SHAPE_MAX_COMBINING_MARKS).
+let hb_max_combining_marks: usize = 32
+
+## The first round and then the second and third: see the header.
+func hb_normalize(font: const HbFontT*, buffer: HbBufferT*):
+    hb_normalize_and_map(font, buffer)
+    hb_reorder_marks(buffer)
+    hb_recompose(font, buffer)
+
+## _hb_ot_shape_normalize for the default shaper's composed-diacritics mode, as far as a
+## font's cmap decides it: a character the font has maps to its glyph; one it lacks is
+## decomposed when the font has every part; a space it lacks uses the space glyph with a
+## fallback width; U+2011 falls back to U+2010; anything else is glyph 0.
+func hb_normalize_and_map(font: const HbFontT*, buffer: HbBufferT*):
+    var mapped: opentype.List[HbGlyphInfo]
+    mapped.reserve(buffer.infos.length())
+    for info in buffer.infos.view():
+        let u = info.character
+        var current = info
+        if let glyph = hb_font_get_nominal_glyph(font, u):
+            current.codepoint = glyph
+            mapped.push(current)
+            continue
+        if hb_decompose_into(font, &mapped, info):
+            continue
+        let space_type = hb_space_fallback_type(u)
+        if space_type != 0:
+            if let space_glyph = hb_font_get_nominal_glyph(font, 0x0020):
+                current.codepoint = space_glyph
+                current.space_fallback = space_type
+                mapped.push(current)
+                continue
+        if u == 0x2011:
+            if let other_glyph = hb_font_get_nominal_glyph(font, 0x2010):
+                current.codepoint = other_glyph
+                mapped.push(current)
+                continue
+        current.codepoint = 0
+        mapped.push(current)
+    buffer.infos.release()
+    buffer.infos = mapped
+
+## The canonical decomposition of a character the font lacks, when the font has every
+## character of it (HarfBuzz's decompose() tries the same, recursively).
+func hb_decompose_into(font: const HbFontT*, mapped: opentype.List[HbGlyphInfo]*, info: HbGlyphInfo) -> bool:
+    let u = info.character
+    # Only precomposed letters and symbols decompose; ASCII never does.
+    if u < 0xC0:
+        return false
+    let single: u32[1] = [u]
+    let parts = hb_normalized(single, unicode.NormalizationForm.nfd)
+    if parts.count < 2:
+        return false
+    var glyphs: u32[8]
+    for position in 0..<parts.count:
+        glyphs[position] = hb_font_get_nominal_glyph(font, parts.values[position]) else return false
+    for position in 0..<parts.count:
+        var current = info
+        current.character = parts.values[position]
+        current.codepoint = glyphs[position]
+        hb_info_set_unicode_props(&current)
+        mapped.push(current)
+    return true
+
+## The second round: stable insertion sort of each run of marks by modified combining class
+## (hb_buffer_t::sort with compare_combining_class), merging the clusters it moves across.
+func hb_reorder_marks(buffer: HbBufferT*):
+    let infos = buffer.infos.view()
+    var i: usize = 0
+    while i < infos.length:
+        if infos[i].combining_class == 0:
+            i += 1
+            continue
+        var end = i + 1
+        while end < infos.length and infos[end].combining_class != 0:
+            end += 1
+        # We are going to do a O(n^2).  Only do this if the sequence is short.
+        if end - i <= hb_max_combining_marks:
+            for k in i + 1..<end:
+                var j = k
+                while j > i and infos[j - 1].combining_class > infos[k].combining_class:
+                    j -= 1
+                if j == k:
+                    continue
+                # Move item k to occupy place for item j, shift what's in between.
+                var cluster = infos[k].cluster
+                for m in j..<k + 1:
+                    if infos[m].cluster < cluster:
+                        cluster = infos[m].cluster
+                for m in j..<k + 1:
+                    infos[m].cluster = cluster
+                let moved = infos[k]
+                var m = k
+                while m > j:
+                    infos[m] = infos[m - 1]
+                    m -= 1
+                infos[j] = moved
+        i = end
+
+## The third round: a mark composes with its starter when every mark between them has a
+## smaller combining class, Unicode composes them, and the font has the composition.
+func hb_recompose(font: const HbFontT*, buffer: HbBufferT*):
+    let count = buffer.infos.length()
+    if count < 2:
+        return
+    var output: opentype.List[HbGlyphInfo]
+    output.reserve(count)
+    output.push(*buffer.infos.at(0))
+    var starter: usize = 0
+    for index in 1..<count:
+        let current = *buffer.infos.at(index)
+        let u = current.character
+        # We don't try to compose a non-mark character with it's preceding starter.
+        if hb_is_mark(u):
+            let previous = *output.last()
+            # If there's anything between the starter and this char, they should have CCC
+            # smaller than this character's.
+            let unblocked = starter == output.length() - 1 or previous.combining_class < current.combining_class
+            if unblocked:
+                let starter_info = output.at(starter)
+                let pair: u32[2] = [starter_info.character, u]
+                let composed = hb_normalized(pair, unicode.NormalizationForm.nfc)
+                if composed.count == 1:
+                    let composed_code_point = composed.values[0]
+                    if let glyph = hb_font_get_nominal_glyph(font, composed_code_point):
+                        # Composes: merge the clusters from the starter on, drop the mark.
+                        var cluster = current.cluster
+                        for m in starter..<output.length():
+                            if output.at(m).cluster < cluster:
+                                cluster = output.at(m).cluster
+                        for m in starter..<output.length():
+                            output.at(m).cluster = cluster
+                        let modified = output.at(starter)
+                        modified.character = composed_code_point
+                        modified.codepoint = glyph
+                        hb_info_set_unicode_props(modified)
+                        continue
+        # Blocked, or doesn't compose.
+        output.push(current)
+        if current.combining_class == 0:
+            starter = output.length() - 1
+    buffer.infos.release()
+    buffer.infos = output

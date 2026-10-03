@@ -1,0 +1,193 @@
+#==============================================================================================
+#
+#   tests_support - helpers of the shaping tests: the test fonts as HarfBuzz fonts and the
+#                   layout of shaped glyphs that the expectations were printed through
+#
+#   DESCRIPTION:
+#       The test fonts live in tests/fonts (see NOTICE there); `luce-base test` runs from the
+#       repository root (test.sh). tests_oracle.lucb holds the expectations, printed through
+#       Ladybird's Gfx::shape_text and measure_text_width over HarfBuzz; the bodies here make
+#       the HarfBuzz font as Gfx::Font::harfbuzz_font does (the scale is the pixel size times
+#       64) and place the glyphs as shape_text does.
+#
+#==============================================================================================
+
+## The directory of the test fonts, relative to the repository root.
+let test_fonts_directory: str = "tests/fonts/"
+
+## Gfx::text_shaping_resolution: HarfBuzz positions are in 1/64 pixels.
+let test_shaping_resolution: f32 = 64.0
+
+## A font file loaded once per test run: its bytes and face.
+struct TestLoadedFile:
+    var name: str
+    var data: u8[]
+    var face: HbFaceT*
+
+var test_loaded_files: opentype.List[TestLoadedFile]
+
+## Reads a test file (a path relative to the repository root) into the current allocator.
+func test_read_file(relative_path: str) -> u8[]:
+    var buffer: u8[512]
+    let path = format(buffer, f"{relative_path}") else trap("a test path is too long")
+    return files.read((c.str)path) else trap("cannot read a test file")
+
+## The HarfBuzz face of the test font `name` (a file of tests/fonts), kept in the C heap.
+func test_hb_face(name: str) -> HbFaceT*:
+    for loaded in test_loaded_files.view():
+        if loaded.name == name:
+            return loaded.face
+    with memory.heap:
+        var buffer: u8[512]
+        let path = format(buffer, f"{test_fonts_directory}{name}") else trap("a test path is too long")
+        let data = test_read_file(path)
+        let face = hb_face_create(hb_blob_create(data), 0)
+        test_loaded_files.push(TestLoadedFile(name = name, data = data, face = face))
+        return face
+
+## The pixel size of a Gfx::Font of `point_size` points (Font::Font: point size × 96 / 72).
+func test_pixel_size(point_size: f32) -> f32:
+    return point_size * ((f32)96 / 72.0)
+
+## The HarfBuzz font of a Gfx::Font of `point_size` points over `face`
+## (Font::harfbuzz_font).
+func test_hb_font(face: HbFaceT*, point_size: f32) -> HbFontT*:
+    with memory.heap:
+        let font = hb_font_create(face)
+        let pixel_size = test_pixel_size(point_size)
+        hb_font_set_scale(font, (i32)(pixel_size * test_shaping_resolution), (i32)(pixel_size * test_shaping_resolution))
+        hb_font_set_ptem(font, point_size)
+        return font
+
+## Asserts that two floats are the same float (bit for bit), naming what differs.
+func test_expect_bits(what: str, actual: f32, expected_bits: u32):
+    if actual.bits() != expected_bits:
+        print(f"{what}: got {actual} ({hex(actual.bits())}), expected {f32.bits(expected_bits)} ({hex(expected_bits)})")
+        assert(false, "a float differs from the reference build")
+
+## `text` as UTF-16 code units in `out`, answering how many.
+func test_utf16(text: str, out: u16[]) -> usize:
+    var used: usize = 0
+    var index: usize = 0
+    while index < text.length:
+        let (scalar, size) = hb_decode_utf8(text.bytes, index)
+        index += size
+        if scalar >= 0x10000:
+            let value = scalar - 0x10000
+            out[used] = (u16)(0xD800 + (value >> 10))
+            out[used + 1] = (u16)(0xDC00 + (value & 0x3FF))
+            used += 2
+        else:
+            out[used] = (u16)scalar
+            used += 1
+    return used
+
+## Gfx::setup_text_shaping: ASCII text is Latin, left to right; other text is UTF-16 with its
+## script and direction guessed. Shaped with `font`, no features.
+func test_shape(font: HbFontT*, text: str, units: const u16[]) -> HbBufferT*:
+    let buffer = hb_buffer_create()
+    var ascii = true
+    for byte in text.bytes:
+        if byte >= 0x80:
+            ascii = false
+    if ascii:
+        hb_buffer_add_ascii(buffer, text.bytes)
+        buffer.script = opentype.sfnt_tag('L', 'a', 't', 'n')
+        hb_buffer_set_direction(buffer, HbDirection.ltr)
+    else:
+        hb_buffer_add_utf16(buffer, units)
+        hb_buffer_guess_segment_properties(buffer)
+    var no_features: HbFeature[1]
+    hb_shape(font, buffer, no_features[..<0])
+    return buffer
+
+## One glyph of a shaping expectation.
+struct ShapedGlyph:
+    var id: u32
+    var x: u32
+    var y: u32
+    var width: u32
+    var length: usize
+
+## shape_text's glyph_length_in_code_units.
+func test_length_in_code_units(infos: const HbGlyphInfo[], index: usize, length_in_code_units: usize) -> usize:
+    let starting_offset = infos[index].cluster
+    for i in index + 1..<infos.length:
+        let offset = infos[i].cluster
+        if offset != starting_offset:
+            return (usize)(offset -% starting_offset)
+    return length_in_code_units -% (usize)starting_offset
+
+# mark: Test bodies =================================================================================
+
+## shape_text(baseline_start = (3.5, 20.25), letter_spacing, text, font, Common) and
+## measure_text_width: the glyphs placed from the baseline less the font's ascent.
+func test_body_shape(file: str, point_size: f32, text: str, letter_spacing: f32, expected: const ShapedGlyph[], run_width: u32, measured_width: u32):
+    let face = test_hb_face(file)
+    let font = test_hb_font(face, point_size)
+    let sfnt = face.face else trap("a test font without a face")
+    let ascent = -opentype.sfnt_face_metrics(sfnt, test_pixel_size(point_size)).ascent
+    var units: u16[256]
+    let unit_count = test_utf16(text, units)
+    let buffer = test_shape(font, text, units[..<unit_count])
+    defer hb_buffer_destroy(buffer)
+    let infos = hb_buffer_get_glyph_infos(buffer)
+    let positions = hb_buffer_get_glyph_positions(buffer)
+    if infos.length != expected.length:
+        print(f"{text}: {infos.length} glyphs, expected {expected.length}")
+        for info in infos:
+            print(f"  glyph {info.codepoint} cluster {info.cluster}")
+    assert(infos.length == expected.length)
+    let start_x: f32 = 3.5
+    var point_x = start_x
+    var point_y: f32 = 20.25
+    for index in 0..<infos.length:
+        let x = (point_x - 0.0) + (f32)positions[index].x_offset / test_shaping_resolution
+        let y = (point_y - ascent) + (f32)positions[index].y_offset / test_shaping_resolution
+        let length = test_length_in_code_units(infos, index, unit_count)
+        if infos[index].codepoint != expected[index].id or length != expected[index].length:
+            print(f"{text} glyph {index}: id {infos[index].codepoint} length {length}, expected id {expected[index].id} length {expected[index].length}")
+        assert(infos[index].codepoint == expected[index].id)
+        assert(length == expected[index].length)
+        test_expect_bits("glyph x", x, expected[index].x)
+        test_expect_bits("glyph y", y, expected[index].y)
+        test_expect_bits("glyph width", (f32)positions[index].x_advance / test_shaping_resolution + letter_spacing, expected[index].width)
+        point_x += (f32)positions[index].x_advance / test_shaping_resolution
+        point_y += (f32)positions[index].y_advance / test_shaping_resolution
+        point_x += letter_spacing
+    test_expect_bits("run width", point_x - start_x, run_width)
+    # measure_text_width: the advances summed as integers.
+    var sum: i32 = 0
+    for position in positions:
+        sum = sum +% position.x_advance
+    test_expect_bits("measured width", (f32)sum / test_shaping_resolution + (f32)(u32)positions.length * letter_spacing, measured_width)
+
+## WOFF::try_load_from_bytes of HashSans.woff: the face, its metrics at 12pt and a shaping.
+func test_body_woff(family: str, glyph_count: u32, units_per_em: u16, pixel: u32[6], text: str, run_glyphs: usize, run_width: u32):
+    with memory.heap:
+        let sfnt = opentype.woff_to_sfnt(test_read_file("tests/fonts/HashSans.woff")) else trap("cannot unwrap HashSans.woff")
+        let face = hb_face_create(hb_blob_create(sfnt), 0)
+        let opened = face.face else trap("cannot load HashSans.woff")
+        assert(opened.family_name == family)
+        assert((u32)opened.num_glyphs == glyph_count)
+        assert(opened.units_per_em == units_per_em)
+        let size = test_pixel_size(12.0)
+        let m = opentype.sfnt_face_metrics(opened, size)
+        test_expect_bits("size", size, pixel[0])
+        test_expect_bits("x_height", m.x_height, pixel[1])
+        test_expect_bits("advance_of_ascii_zero", opentype.sfnt_face_measure_ascii(opened, size, b"0"), pixel[2])
+        test_expect_bits("ascent", -m.ascent, pixel[3])
+        test_expect_bits("descent", m.descent, pixel[4])
+        test_expect_bits("line_gap", m.leading, pixel[5])
+        var units: u16[64]
+        let unit_count = test_utf16(text, units)
+        let buffer = test_shape(test_hb_font(face, 12.0), text, units[..<unit_count])
+        let positions = hb_buffer_get_glyph_positions(buffer)
+        assert(positions.length == run_glyphs)
+        # shape_text's run width: the pen from (3.5, 20.25) on, less where it started.
+        let start_x: f32 = 3.5
+        var point_x = start_x
+        for position in positions:
+            point_x += (f32)position.x_advance / test_shaping_resolution
+            point_x += 0.0
+        test_expect_bits("run width", point_x - start_x, run_width)

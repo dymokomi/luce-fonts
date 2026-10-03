@@ -1,0 +1,25 @@
+#==============================================================================================
+#
+#   opentype - OpenType and TrueType font files: faces, cmaps, glyph outlines and metrics
+#
+#   DESCRIPTION:
+#       A pure-Luce reader of sfnt font files (.ttf, .otf, .ttc) and their WOFF wrapping,
+#       with no platform library: the table directory (collections too), head, maxp, hhea,
+#       OS/2, post and name; the cmap (formats 0, 4, 6, 10, 12, 13); TrueType glyf outlines
+#       (simple and composite) and CFF/CFF2 charstrings; and the metrics FreeType and Skia
+#       derive from them, float for float, so text measures as a browser measures it.
+#       Outlines come as GlyphPaths (move, line, quad, cubic, close) at any pixel size.
+#       Shaping (GSUB, GPOS, kerning) is the `shaping` module's.
+#
+#       Written for the Luce port of Ladybird, whose web fonts read files through Skia's
+#       FreeType backend and HarfBuzz; the numbers are pinned to theirs by the oracle tests.
+#
+#==============================================================================================
+
+import c
+import memory
+from luce_std import files, math, math32
+from luce_compress import flate
+
+## The bytes are not a font this reader can open, or a font table is malformed.
+pub let invalid_font: ErrorCode = ErrorCode.package(119)

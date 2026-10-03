@@ -20,6 +20,7 @@ jobs:
           "std=$(Get-Content luce-fonts/bootstrap/STD)" >> $env:GITHUB_OUTPUT
           "window=$(Get-Content luce-fonts/bootstrap/WINDOW)" >> $env:GITHUB_OUTPUT
           "gpu=$(Get-Content luce-fonts/bootstrap/GPU)" >> $env:GITHUB_OUTPUT
+          "compress=$(Get-Content luce-fonts/bootstrap/COMPRESS)" >> $env:GITHUB_OUTPUT
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
@@ -40,6 +41,11 @@ jobs:
           repository: dymokomi/luce-gpu
           ref: ${{ steps.pins.outputs.gpu }}
           path: luce-gpu
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-compress
+          ref: ${{ steps.pins.outputs.compress }}
+          path: luce-compress
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64

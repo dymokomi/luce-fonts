@@ -1,0 +1,113 @@
+#==============================================================================================
+#
+#   tests_support - helpers of the opentype tests: loading the test fonts and checking the
+#                   module's answers against the reference build's
+#
+#   DESCRIPTION:
+#       The test fonts live in tests/fonts (see NOTICE there); `luce-base test` runs from the
+#       repository root (test.sh). tests_oracle.lucb holds the expectations, printed through
+#       Ladybird's Gfx::Font over Skia's FreeType backend; the bodies here compute the same
+#       numbers from this module, as Gfx::Font computes them from its SkFont.
+#
+#==============================================================================================
+
+## The directory of the test fonts, relative to the repository root.
+let test_fonts_directory: str = "tests/fonts/"
+
+## A face loaded once per test run, with its bytes.
+struct TestLoadedFace:
+    var name: str
+    var data: u8[]
+    var face: SfntFace*
+
+var test_loaded_faces: List[TestLoadedFace]
+
+## Reads a test file (a path relative to the repository root) into the current allocator.
+func test_read_file(relative_path: str) -> u8[]:
+    var buffer: u8[512]
+    let path = format(buffer, f"{relative_path}") else trap("a test path is too long")
+    return files.read((c.str)path) else trap("cannot read a test file")
+
+## The face of the test font `name` (a file of tests/fonts), kept in the C heap for the run.
+func test_face(name: str) -> SfntFace*:
+    for loaded in test_loaded_faces.view():
+        if loaded.name == name:
+            return loaded.face
+    with memory.heap:
+        var buffer: u8[512]
+        let path = format(buffer, f"{test_fonts_directory}{name}") else trap("a test path is too long")
+        let data = test_read_file(path)
+        let face = sfnt_face_create(data, 0) else trap("cannot load a test font")
+        test_loaded_faces.push(TestLoadedFace(name = name, data = data, face = face))
+        return face
+
+## The pixel size of a Gfx::Font of `point_size` points (Font::Font: point size × 96 / 72).
+func test_pixel_size(point_size: f32) -> f32:
+    return point_size * ((f32)96 / 72.0)
+
+## Asserts that two floats are the same float (bit for bit), naming what differs.
+func test_expect_bits(what: str, actual: f32, expected_bits: u32):
+    if actual.bits() != expected_bits:
+        print(f"{what}: got {actual} ({hex(actual.bits())}), expected {f32.bits(expected_bits)} ({hex(expected_bits)})")
+        assert(false, "a float differs from the reference build")
+
+# mark: Test bodies =================================================================================
+
+## A face's names and numbers (Typeface::family, weight, width, slope, units_per_em and
+## glyph_count).
+func test_body_face(file: str, family: str, weight: u16, width: u16, slope: u8, units_per_em: u16, glyph_count: u32):
+    let face = test_face(file)
+    assert(face.family_name == family)
+    assert(sfnt_face_weight(face) == weight)
+    assert(sfnt_face_width(face) == width)
+    assert(sfnt_face_slope(face) == slope)
+    assert(face.units_per_em == units_per_em)
+    assert((u32)face.num_glyphs == glyph_count)
+
+## Glyph ids of code points (TypefaceSkia's glyph pages: SkTypeface::unicharToGlyph as u16).
+func test_body_glyph_ids(file: str, code_points: u32[12], glyphs: u32[12]):
+    let face = test_face(file)
+    for (index, code_point) in code_points.indexed():
+        let glyph = (u32)(u16)sfnt_face_ft_glyph_for_code_point(face, code_point)
+        if glyph != glyphs[index]:
+            print(f"U+{hex(code_point)}: glyph {glyph}, expected {glyphs[index]}")
+        assert(glyph == glyphs[index])
+
+## FontPixelMetrics (size, x_height, advance_of_ascii_zero, ascent, descent, line_gap) and
+## ScaledFontMetrics (ascender, descender, line_gap, x_height) with preferred_line_height, as
+## Gfx::Font makes them from the SkFont's metrics at its pixel size.
+func test_body_metrics(file: str, point_size: f32, pixel: u32[6], scaled: u32[5]):
+    let face = test_face(file)
+    let size = test_pixel_size(point_size)
+    let m = sfnt_face_metrics(face, size)
+    test_expect_bits("size", size, pixel[0])
+    test_expect_bits("x_height", m.x_height, pixel[1])
+    test_expect_bits("advance_of_ascii_zero", sfnt_face_measure_ascii(face, size, b"0"), pixel[2])
+    test_expect_bits("ascent", -m.ascent, pixel[3])
+    test_expect_bits("descent", m.descent, pixel[4])
+    test_expect_bits("line_gap", m.leading, pixel[5])
+    # Font::metrics measures the SkFont of skia_font(1): the pixel size times 1.
+    let s = sfnt_face_metrics(face, size * 1.0)
+    test_expect_bits("ascender", -s.ascent, scaled[0])
+    test_expect_bits("descender", s.descent, scaled[1])
+    test_expect_bits("scaled line_gap", s.leading, scaled[2])
+    test_expect_bits("scaled x_height", s.x_height, scaled[3])
+    test_expect_bits("preferred_line_height", (-s.ascent + s.descent) + s.leading, scaled[4])
+
+## SkFont::getPath of the glyph of `code_point` at the font's pixel size times `scale`.
+func test_body_path(file: str, point_size: f32, code_point: u32, scale: f32, glyph: u32, verbs: const u8[], points: const u32[]):
+    let face = test_face(file)
+    assert((u32)(u16)sfnt_face_ft_glyph_for_code_point(face, code_point) == glyph)
+    var path = sfnt_face_glyph_path(face, glyph, test_pixel_size(point_size) * scale)
+    defer path.release()
+    let actual_verbs = path.verbs.view()
+    let actual_points = path.points.view()
+    if actual_verbs.length != verbs.length or actual_points.length * 2 != points.length:
+        print(f"path of U+{hex(code_point)}: {actual_verbs.length} verbs and {actual_points.length} points, expected {verbs.length} and {points.length // 2}")
+    assert(actual_verbs.length == verbs.length)
+    assert(actual_points.length * 2 == points.length)
+    for (index, verb) in actual_verbs.indexed():
+        assert((u8)verb == verbs[index])
+    for (index, point) in actual_points.indexed():
+        test_expect_bits("path x", point.x, points[index * 2])
+        test_expect_bits("path y", point.y, points[index * 2 + 1])

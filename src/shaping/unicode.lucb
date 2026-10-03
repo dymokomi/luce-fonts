@@ -1,0 +1,108 @@
+#==============================================================================================
+#
+#   unicode - the Unicode properties the shaper reads: marks, scripts, Emoji, combining
+#             classes and canonical normalization
+#
+#   DESCRIPTION:
+#       What HarfBuzz asks its hb_unicode_funcs_t for. General categories of marks, scripts
+#       and the Emoji property come from unicode_tables.lucb (tools/shaping_unicode.py);
+#       canonical combining classes and NFD/NFC from luce-std's unicode module, of the same
+#       Unicode version.
+#
+#==============================================================================================
+
+## The value of the step function `steps` (entries `start << 8 | value`) at `scalar`.
+func unicode_step_value(steps: const u32[], scalar: u32) -> u32:
+    if scalar > 0x10FFFF:
+        return 0
+    # The last entry whose start is at or before `scalar`.
+    var low: usize = 0
+    var high = steps.length
+    while low + 1 < high:
+        let middle = (low + high) // 2
+        if (steps[middle] >> 8) <= scalar:
+            low = middle
+        else:
+            high = middle
+    return steps[low] & 0xFF
+
+## Whether `u` is a mark (general category Mn, Mc or Me).
+func hb_is_mark(u: u32) -> bool:
+    return unicode_step_value(mark_steps, u) != 0
+
+## Whether `u` is a non-spacing mark (general category Mn).
+func hb_is_nonspacing_mark(u: u32) -> bool:
+    return unicode_step_value(mark_steps, u) == 1
+
+## Whether `u` has the Emoji property.
+func hb_is_emoji(u: u32) -> bool:
+    return unicode_step_value(emoji_steps, u) != 0
+
+## The ISO 15924 code of `code_point`'s script as an HB_TAG ('Latn'), or 0 for Common,
+## Inherited and Unknown (what hb_unicode_funcs_t::script answers, as a tag).
+func hb_script_of(code_point: u32) -> u32:
+    let index = (usize)unicode_step_value(script_steps, code_point)
+    if index == 0:
+        return 0
+    let bytes = script_codes[index].bytes
+    return opentype.sfnt_tag(bytes[0], bytes[1], bytes[2], bytes[3])
+
+## The canonical combining class of `u` (0 for anything but a mark that has one).
+func hb_canonical_combining_class(u: u32) -> u8:
+    return unicode.combining_class(u)
+
+## At most eight scalar values: the canonical form of one or two characters.
+struct HbScalars:
+    var values: u32[8]
+    var count: usize
+
+## `code_points` (one or two scalar values) normalized to `form`, as scalar values.
+func hb_normalized(code_points: const u32[], form: unicode.NormalizationForm) -> HbScalars:
+    var utf8: u8[8]
+    var length: usize = 0
+    for code_point in code_points:
+        length += hb_encode_utf8(code_point, utf8[length..])
+    var result: HbScalars
+    let normalized = unicode.normalize((str)utf8[..<length], form) else return result
+    defer unicode.release(normalized)
+    let bytes = normalized.bytes
+    var index: usize = 0
+    while index < bytes.length and result.count < result.values.length:
+        let (code_point, size) = hb_decode_utf8(bytes, index)
+        result.values[result.count] = code_point
+        result.count += 1
+        index += size
+    return result
+
+## The UTF-8 encoding of a scalar value into `out`, answering its length.
+func hb_encode_utf8(code_point: u32, out: u8[]) -> usize:
+    if code_point < 0x80:
+        out[0] = (u8)code_point
+        return 1
+    if code_point < 0x800:
+        out[0] = (u8)(0xC0 | (code_point >> 6))
+        out[1] = (u8)(0x80 | (code_point & 0x3F))
+        return 2
+    if code_point < 0x10000:
+        out[0] = (u8)(0xE0 | (code_point >> 12))
+        out[1] = (u8)(0x80 | ((code_point >> 6) & 0x3F))
+        out[2] = (u8)(0x80 | (code_point & 0x3F))
+        return 3
+    out[0] = (u8)(0xF0 | (code_point >> 18))
+    out[1] = (u8)(0x80 | ((code_point >> 12) & 0x3F))
+    out[2] = (u8)(0x80 | ((code_point >> 6) & 0x3F))
+    out[3] = (u8)(0x80 | (code_point & 0x3F))
+    return 4
+
+## The scalar value at `index` of valid UTF-8 and its length.
+func hb_decode_utf8(bytes: const u8[], index: usize) -> (u32, usize):
+    let b0 = (u32)bytes[index]
+    if b0 < 0x80:
+        return (b0, 1)
+    if b0 < 0xE0 and index + 1 < bytes.length:
+        return (((b0 & 0x1F) << 6) | ((u32)bytes[index + 1] & 0x3F), 2)
+    if b0 < 0xF0 and index + 2 < bytes.length:
+        return (((b0 & 0x0F) << 12) | (((u32)bytes[index + 1] & 0x3F) << 6) | ((u32)bytes[index + 2] & 0x3F), 3)
+    if index + 3 < bytes.length:
+        return (((b0 & 0x07) << 18) | (((u32)bytes[index + 1] & 0x3F) << 12) | (((u32)bytes[index + 2] & 0x3F) << 6) | ((u32)bytes[index + 3] & 0x3F), 4)
+    return (0xFFFD, 1)
