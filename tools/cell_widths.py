@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/luce_fonts/fonts/cell_table.lucb, the terminal cell width of every scalar.
+"""Generate src/fonts/cell_table.lucb, the terminal cell width of every scalar.
 
 usage: tools/cell_widths.py
 
@@ -20,7 +20,7 @@ import sys
 import unicodedata
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "src/luce_fonts/fonts/cell_table.lucb"
+OUTPUT = ROOT / "src/fonts/cell_table.lucb"
 ZERO_RANGES = [(0x200B, 0x200F), (0x2060, 0x2064), (0xFEFF, 0xFEFF), (0x1160, 0x11FF)]
 
 
