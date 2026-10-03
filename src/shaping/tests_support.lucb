@@ -59,9 +59,20 @@ func test_hb_font(face: HbFaceT*, point_size: f32) -> HbFontT*:
         hb_font_set_ptem(font, point_size)
         return font
 
-## Asserts that two floats are the same float (bit for bit), naming what differs.
+## A float's bits as an integer that orders floats as their values (for ulp distances).
+func test_ordered_bits(bits: u32) -> i64:
+    if (bits & 0x80000000) != 0:
+        return -(i64)(bits & 0x7FFFFFFF)
+    return (i64)bits
+
+## Asserts that two floats are the same float, naming what differs: bit for bit on macOS, where
+## the expectations were printed, and within 64 ulps on other hosts.
 func test_expect_bits(what: str, actual: f32, expected_bits: u32):
-    if actual.bits() != expected_bits:
+    var distance = test_ordered_bits(actual.bits()) - test_ordered_bits(expected_bits)
+    if distance < 0:
+        distance = -distance
+    let allowed: i64 = 0 if os.macos else 64
+    if distance > allowed:
         print(f"{what}: got {actual} ({hex(actual.bits())}), expected {f32.bits(expected_bits)} ({hex(expected_bits)})")
         assert(false, "a float differs from the reference build")
 

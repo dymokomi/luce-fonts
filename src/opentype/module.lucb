@@ -18,6 +18,7 @@
 
 import c
 import memory
+import os
 from luce_std import files, math, math32
 from luce_compress import flate
 

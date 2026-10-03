@@ -19,5 +19,6 @@
 
 import c
 import memory
+import os
 from luce_std import files, math32, unicode
 import opentype
