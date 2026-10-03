@@ -4,7 +4,7 @@ def package "luce-fonts" {
     str version = "0.3.2"
     str kind = "package"
     str language = "luce-base"
-    str description = "Fonts for Luce: native installed families and styles, proportional type set in paragraphs and monospace code faces (CoreText, GDI, cairo), and a portable OpenType engine: sfnt/CFF/WOFF font files, FreeType-exact metrics and outlines, and HarfBuzz-style shaping."
+    str description = "Fonts for Luce: native installed faces and paragraph type (CoreText, GDI, cairo) and a portable OpenType engine: sfnt/CFF/WOFF files, FreeType-exact metrics and outlines, HarfBuzz-style shaping."
     str readme = "README.md"
     str[] public = ["fonts", "opentype", "shaping"]
 
