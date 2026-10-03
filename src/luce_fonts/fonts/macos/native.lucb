@@ -64,7 +64,7 @@ func mac_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
     CGContextSetShouldSmoothFonts(context, false)
     CGContextSetGrayFillColor(context, 1.0, 1.0)
     var offset: usize = 0
-    var index: usize = 0
+    var column: usize = 0
     while offset < text.length:
         let start = offset
         let decoded = utf8.decode(text.bytes, offset) else trap("validated text changed")
@@ -88,12 +88,14 @@ func mac_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
             if let replacement = fallback:
                 chosen = replacement
                 discard(CTFontGetGlyphsForCharacters(chosen, &characters[0], &glyphs[0], count))
-        var position = FontPoint(2.0 + (f64)index * face.advance * scale,
-                                 (f64)bitmap.height - 2.0 - face.ascent * scale)
+        let width = cells(scalar)
+        let glyph = CTFontGetAdvancesForGlyphs(chosen, 0, &glyphs[0], none, 1) / scale
+        let x = (f64)column * face.advance + glyph_offset(width, glyph, face.advance)
+        var position = FontPoint(2.0 + x * scale, (f64)bitmap.height - 2.0 - face.ascent * scale)
         CTFontDrawGlyphs(chosen, &glyphs[0], &position, 1, context)
         if let replacement = fallback:
             CFRelease(replacement)
-        index += 1
+        column += (usize)width
 
 # mark: Proportional type ======================================================================
 

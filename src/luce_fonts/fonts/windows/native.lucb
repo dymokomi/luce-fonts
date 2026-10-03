@@ -107,10 +107,11 @@ func win_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
     defer discard(SelectObject(dc, original))
     var matrix = FontMatrix()
     var offset: usize = 0
-    var index: usize = 0
+    var cell: usize = 0
     while offset < text.length:
         let decoded = utf8.decode(text.bytes, offset) else trap("validated text changed")
         offset += decoded.width
+        let width = cells((u32)decoded.scalar)
         var metrics: GlyphMetrics
         let character = (u32)decoded.scalar if (u32)decoded.scalar <= 65535 else (u32)65533
         let length = GetGlyphOutlineW(dc, character, 6, &metrics, 0, none, &matrix)
@@ -124,7 +125,8 @@ func win_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
             let stride = ((usize)metrics.width + 3) // 4 * 4
             if stride * (usize)metrics.height > native.length:
                 error(failed, "native glyph dimensions exceed its buffer")
-            let left = 2 + (i64)math.round((f64)index * face.advance * scale) + (i64)metrics.x
+            let origin = (f64)cell * face.advance + glyph_offset(width, (f64)metrics.advance_x / scale, face.advance)
+            let left = 2 + (i64)math.round(origin * scale) + (i64)metrics.x
             let top = 2 + (i64)math.ceil(face.ascent * scale) - (i64)metrics.y
             for row in 0..<(usize)metrics.height:
                 for column in 0..<(usize)metrics.width:
@@ -135,7 +137,7 @@ func win_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
                         let at = (usize)y * (usize)bitmap.width + (usize)x
                         if coverage > bitmap.pixels[at]:
                             bitmap.pixels[at] = coverage
-        index += 1
+        cell += (usize)width
 
 # mark: Proportional type ======================================================================
 

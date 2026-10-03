@@ -150,17 +150,24 @@ func linux_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
     api.set_font_size(context, face.size * scale)
     api.set_source_rgba(context, 1.0, 1.0, 1.0, 1.0)
     var offset: usize = 0
-    var index: usize = 0
+    var column: usize = 0
     while offset < text.length:
         let decoded = utf8.decode(text.bytes, offset) else trap("validated text changed")
         var scalar: u8[5]
         for byte in 0..<decoded.width:
             scalar[byte] = text.bytes[offset + byte]
         scalar[decoded.width] = 0
-        api.move_to(context, 2.0 + (f64)index * face.advance * scale, 2.0 + face.ascent * scale)
+        let width = cells((u32)decoded.scalar)
+        var glyph = 0.0
+        if width != 1:
+            var extents: CairoTextMetrics
+            api.text_extents(context, (c.str)&scalar[0], &extents)
+            glyph = extents.advance_x / scale
+        let x = (f64)column * face.advance + glyph_offset(width, glyph, face.advance)
+        api.move_to(context, 2.0 + x * scale, 2.0 + face.ascent * scale)
         api.show_text(context, (c.str)&scalar[0])
         offset += decoded.width
-        index += 1
+        column += (usize)width
     if api.status(context) != 0:
         error(failed, "could not rasterize the font text")
     api.surface_flush(surface)

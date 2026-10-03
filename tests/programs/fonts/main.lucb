@@ -12,6 +12,7 @@ pub func main(arguments: str[]) -> i32!:
     assert(face.size == 14.0 and face.advance > 0.0 and face.ascent > 0.0 and face.descent >= 0.0)
     assert(try face.measure("iii") == try face.measure("WWW"))
     assert(try face.measure("é—") == face.advance * 2.0)
+    try wide_cells(&face)
     var blank = try face.rasterize("   ", 2.0)
     defer blank.close()
     for pixel in blank.pixels:
@@ -107,3 +108,54 @@ func proportional() -> !:
     var justified = try fonts.set_text(&face, "one two three four five six", fonts.Setting(width = 260.0, alignment = 3))
     defer justified.close()
     assert(justified.lines >= 2)
+
+## Wide scalars take two cells and marks none: in measure, in the bitmap's width and
+## in where each glyph lands. "田a" draws its 'a' exactly where "  a" does.
+func wide_cells(face: fonts.Face*) -> !:
+    assert(try face.measure("田中") == face.advance * 4.0)
+    assert(try face.measure("会議の件") == face.advance * 8.0)
+    assert(try face.measure("e\u{301}") == face.advance)
+    assert(try face.measure("\u{20000}x") == face.advance * 3.0)
+    assert(try fonts.text_cells("田a") == 3)
+    for scale in [1.0, 2.0]:
+        var wide = try face.rasterize("田a", scale)
+        defer wide.close()
+        var narrow = try face.rasterize("  a", scale)
+        defer narrow.close()
+        assert(wide.width == narrow.width and wide.height == narrow.height)
+        let cell = face.advance * scale
+        # Everything from just past the second cell on is the 'a', placed alike.
+        let boundary = (usize)(2.0 + 2.0 * cell) + 1
+        var ink: usize = 0
+        for row in 0..<(usize)wide.height:
+            for column in boundary..<(usize)wide.width:
+                let at = row * (usize)wide.width + column
+                assert(wide.pixels[at] == narrow.pixels[at])
+                if wide.pixels[at] > 0:
+                    ink += 1
+        assert(ink > 4)
+        # The ideograph spans both of its cells: ink on either side of the first cell's edge.
+        var left = false
+        var right = false
+        for row in 0..<(usize)wide.height:
+            for column in 2..<boundary - 1:
+                if wide.pixels[row * (usize)wide.width + column] > 0:
+                    if (f64)column < 2.0 + cell:
+                        left = true
+                    else:
+                        right = true
+        assert(left and right)
+        # A combining mark composes over its base: no extra cell, more ink.
+        var plain = try face.rasterize("e", scale)
+        defer plain.close()
+        var marked = try face.rasterize("e\u{301}", scale)
+        defer marked.close()
+        assert(marked.width == plain.width)
+        var plain_ink: usize = 0
+        var marked_ink: usize = 0
+        for at in 0..<plain.pixels.length:
+            if plain.pixels[at] > 0:
+                plain_ink += 1
+            if marked.pixels[at] > 0:
+                marked_ink += 1
+        assert(marked_ink > plain_ink)

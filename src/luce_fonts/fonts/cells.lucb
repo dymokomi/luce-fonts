@@ -1,0 +1,90 @@
+#==============================================================================================
+#
+#   cells - How many monospace grid cells a scalar or a text takes
+#
+#   DESCRIPTION:
+#       Terminal (wcwidth) semantics: East Asian wide and full-width scalars take two
+#       cells, combining marks and other zero-width scalars none, everything else one.
+#       The monospace face measures and places glyphs by these counts, and UI code that
+#       lays text on the same grid (columns, carets, truncation) must count alike.
+#
+#==============================================================================================
+
+## How many cells `scalar` takes on the monospace grid: 2 for East Asian Width W or F,
+## 0 for combining marks (Mn, Me), U+200B..U+200F, U+2060..U+2064, U+FEFF, variation
+## selectors and the Hangul medial and final jamo, 1 for everything else (control
+## characters included; callers handle those). Scalars past U+10FFFF take one cell.
+pub func cells(scalar: u32) -> u32:
+    if scalar < 0x300:
+        # Latin-1 and the extended Latin blocks before the combining marks: one cell each.
+        return 1
+    if scalar > 0x10FFFF:
+        return 1
+    # The last step whose start is at or before `scalar`.
+    var low: usize = 0
+    var high = cell_steps.length
+    while low + 1 < high:
+        let middle = (low + high) // 2
+        if (cell_steps[middle] >> 2) <= scalar:
+            low = middle
+        else:
+            high = middle
+    return cell_steps[low] & 3
+
+## The cells `text` takes on the monospace grid: the sum of `cells` over its scalars.
+## Fails when `text` is not valid UTF-8.
+pub func text_cells(text: str) -> usize!:
+    var offset: usize = 0
+    var total: usize = 0
+    while offset < text.length:
+        let decoded = utf8.decode(text.bytes, offset) else error(failed, "text must be valid UTF-8")
+        total += (usize)cells((u32)decoded.scalar)
+        offset += decoded.width
+    return total
+
+test "ASCII, Latin and controls take one cell":
+    assert(cells((u32)'A') == 1 and cells((u32)' ') == 1 and cells((u32)'~') == 1)
+    assert(cells(0) == 1 and cells(9) == 1 and cells(0x7F) == 1)
+    assert(cells(0xE9) == 1 and cells(0x2014) == 1 and cells(0x0416) == 1)
+
+test "CJK, kana, Hangul syllables and full-width forms take two cells":
+    assert(cells(0x7530) == 2 and cells(0x4E2D) == 2)     # 田 中
+    assert(cells(0x3042) == 2 and cells(0x30A2) == 2)     # あ ア
+    assert(cells(0xAC00) == 2 and cells(0xD7A3) == 2)     # 가 힣
+    assert(cells(0x1100) == 2 and cells(0x115F) == 2)     # leading jamo
+    assert(cells(0xFF01) == 2 and cells(0xFF21) == 2)     # ！ Ａ
+    assert(cells(0x3000) == 2)                            # ideographic space
+    assert(cells(0xFF61) == 1)                            # half-width katakana stays narrow
+
+test "astral CJK and emoji presentation take two cells":
+    assert(cells(0x20000) == 2 and cells(0x2A6DF) == 2 and cells(0x30000) == 2)
+    assert(cells(0x1F600) == 2 and cells(0x1F680) == 2 and cells(0x231A) == 2)
+    assert(cells(0x2614) == 2)                            # ☔ has emoji presentation
+    assert(cells(0x2603) == 1)                            # ☃ is text by default
+
+test "combining marks and invisible scalars take none":
+    assert(cells(0x0300) == 0 and cells(0x0301) == 0 and cells(0x036F) == 0)
+    assert(cells(0x20DD) == 0)                            # enclosing circle (Me)
+    assert(cells(0x3099) == 0)                            # combining kana voiced mark
+    assert(cells(0x200B) == 0 and cells(0x200D) == 0 and cells(0x200F) == 0)
+    assert(cells(0x2060) == 0 and cells(0x2064) == 0 and cells(0xFEFF) == 0)
+    assert(cells(0xFE0F) == 0 and cells(0xE0100) == 0 and cells(0xE01EF) == 0)
+    assert(cells(0x1160) == 0 and cells(0x11FF) == 0)     # medial and final jamo
+    assert(cells(0x0903) == 1)                            # a spacing mark (Mc) keeps its cell
+    assert(cells(0x2065) == 1 and cells(0x1200) == 1)
+
+test "text cells sum the scalars and reject malformed UTF-8":
+    assert(try text_cells("") == 0)
+    assert(try text_cells("abc") == 3)
+    assert(try text_cells("田中") == 4)
+    assert(try text_cells("会議の件") == 8)
+    assert(try text_cells("田a") == 3)
+    assert(try text_cells("e\u{301}") == 1)
+    assert(try text_cells("👍\u{FE0F}") == 2)
+    assert(try text_cells("\u{20000}x") == 3)
+    var malformed: u8[2] = [0xE7, 0x94]
+    var rejected = false
+    discard(text_cells((str)malformed[..<2])) catch failure:
+        assert(failure.code == failed)
+        rejected = true
+    assert(rejected)

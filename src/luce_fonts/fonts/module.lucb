@@ -74,13 +74,17 @@ pub struct Face:
         self.ascent = loaded.ascent
         self.descent = loaded.descent
 
-    ## The rendered width of `text` in points: one cell advance per scalar.
+    ## The rendered width of `text` in points: `text_cells(text)` cell advances, so a
+    ## wide scalar takes two cells and a combining mark none.
     pub func measure(text: str) -> f64!:
         if self.native == none:
             error(failed, "the font is closed")
-        return (f64)(try scalar_count(text)) * self.advance
+        try check_run(text)
+        return (f64)(try text_cells(text)) * self.advance
 
-    ## One scalar per monospace cell, with native glyph fallback where available.
+    ## Each scalar placed at its cumulative cell column, with native glyph fallback
+    ## where available: a wide glyph is centered in its two cells, and a zero-width
+    ## mark is drawn at the column after its base without advancing, so it composes.
     ## This is code-grid text, not paragraph shaping or bidirectional layout.
     pub func rasterize(text: str, scale: f64 = 1.0) -> Bitmap!:
         try check_thread()
@@ -120,7 +124,9 @@ func check_thread() -> !:
     if not thread.is_main():
         error(interop.wrong_thread, "font operations require the UI thread")
 
-func scalar_count(text: str) -> usize!:
+## Reject a run the rasterizer cannot set: over 4096 bytes or 1024 scalars, malformed
+## UTF-8, or holding NUL, a tab or a line break.
+func check_run(text: str) -> !:
     if text.length > 4096:
         error(failed, "a text run supports at most 4096 UTF-8 bytes")
     var offset: usize = 0
@@ -133,7 +139,19 @@ func scalar_count(text: str) -> usize!:
         count += 1
     if count > 1024:
         error(failed, "a text run supports at most 1024 scalars")
-    return count
+
+## Where the pen goes for the glyph of a scalar `span` cells wide whose own advance is
+## `glyph` points, relative to its column's left edge, in a grid of `advance`-point
+## cells. A wide glyph is centered in its two cells. A zero-width mark's glyph ends at
+## its column, the edge after its base: a true non-spacing glyph (no advance) draws
+## back over the base from there, and a font that gives its marks a spacing advance
+## has them overstrike the base cell all the same. Others start at the column.
+func glyph_offset(span: u32, glyph: f64, advance: f64) -> f64:
+    if span == 2 and glyph > 0.0:
+        return (2.0 * advance - glyph) * 0.5
+    if span == 0:
+        return -glyph
+    return 0.0
 
 struct NativeFace:
     var native: void*?

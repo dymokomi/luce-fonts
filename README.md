@@ -6,7 +6,7 @@ Native font rasterisation: glyph coverage and metrics from the platform's text e
 
 | import | what it holds |
 | --- | --- |
-| `import fonts` | Native font resources and grayscale rasterization |
+| `import fonts` | Native font resources, grayscale rasterization and terminal cell widths (`cells`, `text_cells`) |
 
 ## Using it
 

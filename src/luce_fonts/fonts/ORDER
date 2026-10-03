@@ -1,4 +1,6 @@
 module.lucb
+cells.lucb
+cell_table.lucb
 type.lucb
 macos/native.lucb
 windows/native.lucb
