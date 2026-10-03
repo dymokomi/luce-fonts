@@ -1,9 +1,9 @@
 ## Native font metrics, grayscale coverage and the copied GPU mask contract.
-import luce_fonts.fonts
-import luce_gpu.gpu
+from luce_fonts import fonts
+from luce_gpu import gpu
 import memory
 import platform
-import luce_window.window
+from luce_window import window
 
 pub func main(arguments: str[]) -> i32!:
     try proportional()

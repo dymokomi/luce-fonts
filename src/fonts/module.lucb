@@ -10,12 +10,12 @@
 
 import c
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 import platform
 import strings
 import thread
-import luce_std.utf8
+from luce_std import utf8
 import windows_text
 import windows_abi
 ## A font operation failed, or its arguments were rejected.
