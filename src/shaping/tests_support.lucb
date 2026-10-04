@@ -21,16 +21,16 @@ let test_shaping_resolution: f32 = 64.0
 ## A font file loaded once per test run: its bytes and face.
 struct TestLoadedFile:
     var name: str
-    var data: u8[]
+    var data: const u8[]
     var face: HbFaceT*
 
 var test_loaded_files: opentype.List[TestLoadedFile]
 
-## Reads a test file (a path relative to the repository root) into the current allocator.
-func test_read_file(relative_path: str) -> u8[]:
+## Reads a test file (a path relative to the repository root), kept for the run.
+func test_read_file(relative_path: str) -> const u8[]:
     var buffer: u8[512]
     let path = format(buffer, f"{relative_path}") else trap("a test path is too long")
-    return files.read((c.str)path) else trap("cannot read a test file")
+    return (files.read((c.str)path) else trap("cannot read a test file")).value
 
 ## The HarfBuzz face of the test font `name` (a file of tests/fonts), kept in the C heap.
 func test_hb_face(name: str) -> HbFaceT*:

@@ -64,8 +64,8 @@ func hb_normalized(code_points: const u32[], form: unicode.NormalizationForm) ->
         length += hb_encode_utf8(code_point, utf8[length..])
     var result: HbScalars
     let normalized = unicode.normalize((str)utf8[..<length], form) else return result
-    defer unicode.release(normalized)
-    let bytes = normalized.bytes
+    defer normalized.release()
+    let bytes = normalized.value.bytes
     var index: usize = 0
     while index < bytes.length and result.count < result.values.length:
         let (code_point, size) = hb_decode_utf8(bytes, index)
