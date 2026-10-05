@@ -20,7 +20,7 @@ pub struct Names:
     var starts: usize[]
     var count: usize
 
-    pub func create() -> Names!:
+    pub static func create() -> Names!:
         return Names(bytes = try new u8[4096] --- in memory.heap, used = 0, starts = try new usize[64] --- in memory.heap, count = 0)
 
     ## How many names.
