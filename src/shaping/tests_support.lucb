@@ -12,6 +12,8 @@
 #
 #==============================================================================================
 
+import strings
+
 ## The directory of the test fonts, relative to the repository root.
 let test_fonts_directory: str = "tests/fonts/"
 
@@ -29,7 +31,7 @@ var test_loaded_files: opentype.List[TestLoadedFile]
 ## Reads a test file (a path relative to the repository root), kept for the run.
 func test_read_file(relative_path: str) -> const u8[]:
     var buffer: u8[512]
-    let path = format(buffer, f"{relative_path}") else trap("a test path is too long")
+    let path = strings.format(buffer, f"{relative_path}") else trap("a test path is too long")
     return (files.read((c.str)path) else trap("cannot read a test file")).value
 
 ## The HarfBuzz face of the test font `name` (a file of tests/fonts), kept in the C heap.
@@ -39,7 +41,7 @@ func test_hb_face(name: str) -> HbFaceT*:
             return loaded.face
     with memory.heap:
         var buffer: u8[512]
-        let path = format(buffer, f"{test_fonts_directory}{name}") else trap("a test path is too long")
+        let path = strings.format(buffer, f"{test_fonts_directory}{name}") else trap("a test path is too long")
         let data = test_read_file(path)
         let face = hb_face_create(hb_blob_create(data), 0)
         test_loaded_files.push(TestLoadedFile(name = name, data = data, face = face))
@@ -73,7 +75,7 @@ func test_expect_bits(what: str, actual: f32, expected_bits: u32):
         distance = -distance
     let allowed: i64 = 0 if os.macos else 64
     if distance > allowed:
-        print(f"{what}: got {actual} ({hex(actual.bits())}), expected {f32.bits(expected_bits)} ({hex(expected_bits)})")
+        print(f"{what}: got {actual} ({actual.bits():x}), expected {f32.bits(expected_bits)} ({expected_bits:x})")
         assert(false, "a float differs from the reference build")
 
 ## `text` as UTF-16 code units in `out`, answering how many.

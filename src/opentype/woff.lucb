@@ -137,7 +137,7 @@ pub func woff_to_sfnt(buffer: const u8[]) -> u8[]!:
             # the table's size fails for a stream of another length.
             let consumed = flate.inflate_zlib(compressed, destination) catch:
                 error(invalid_font, "Invalid decompressed WOFF table length")
-            discard(consumed)
+            _ = consumed
         else:
             if comp_length != orig_length:
                 error(invalid_font, "Invalid uncompressed WOFF table length")

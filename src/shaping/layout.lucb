@@ -153,7 +153,7 @@ pub struct HbLayoutPlan:
     var apply_trak: bool
 
     ## Free the plan's lookup lists.
-    mutating func release():
+    func release():
         self.gsub_stage_rvrn.release()
         self.gsub_stage_main.release()
         self.gpos_lookups.release()

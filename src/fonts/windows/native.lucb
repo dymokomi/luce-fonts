@@ -80,31 +80,31 @@ func win_face(size: f64, family: str) -> NativeFace!:
     for index in 0..<wide.length:
         description.family[index] = wide[index]
     let font = CreateFontIndirectW(&description) else error(failed, "could not load the font family")
-    errdefer discard(DeleteObject(font))
+    errdefer _ = DeleteObject(font)
     let dc = CreateCompatibleDC(none) else error(failed, "could not create a font context")
-    errdefer discard(DeleteDC(dc))
-    discard(SelectObject(dc, font) else error(failed, "could not select the font"))
+    errdefer _ = DeleteDC(dc)
+    _ = SelectObject(dc, font) else error(failed, "could not select the font")
     var metrics: FontMetrics
     if GetTextMetricsW(dc, &metrics) == 0 or (metrics.pitch & 1) != 0:
         error(failed, "the requested font must be monospace")
     return NativeFace(dc, font, (f64)metrics.average / 64.0, (f64)metrics.ascent / 64.0, (f64)metrics.descent / 64.0)
 
 func win_close(dc: void*, font: void*?):
-    discard(DeleteDC(dc))
+    _ = DeleteDC(dc)
     if let object = font:
-        discard(DeleteObject(object))
+        _ = DeleteObject(object)
 
 func win_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
     let dc = face.native else error(failed, "the font is closed")
     let original = face.auxiliary else error(failed, "the font is closed")
     var description: FontLog
-    if GetObjectW(original, (i32)sizeof(FontLog), &description) != (i32)sizeof(FontLog):
+    if GetObjectW(original, (i32)memory.size_of(FontLog), &description) != (i32)memory.size_of(FontLog):
         error(failed, "could not read font attributes")
     description.height = -(i32)math.round(face.size * scale)
     let font = CreateFontIndirectW(&description) else error(failed, "could not scale the font")
-    defer discard(DeleteObject(font))
-    discard(SelectObject(dc, font) else error(failed, "could not select the scaled font"))
-    defer discard(SelectObject(dc, original))
+    defer _ = DeleteObject(font)
+    _ = SelectObject(dc, font) else error(failed, "could not select the scaled font")
+    defer _ = SelectObject(dc, original)
     var matrix = FontMatrix()
     var offset: usize = 0
     var cell: usize = 0
@@ -118,7 +118,7 @@ func win_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
         if length == 4294967295 or length > 1048576:
             error(failed, "could not rasterize the font glyph")
         if length > 0:
-            let native = try alloc u8[(usize)length] in memory.heap
+            let native = try new u8[(usize)length] --- in memory.heap
             defer free(native) in memory.heap
             if GetGlyphOutlineW(dc, character, 6, &metrics, length, native.data, &matrix) == 4294967295:
                 error(failed, "could not read font coverage")
@@ -187,10 +187,10 @@ func win_type(family: str, style: str, size: f64) -> LoadedType!:
     for index in 0..<wide.length:
         description.family[index] = wide[index]
     let font = CreateFontIndirectW(&description) else error(failed, "could not load the font")
-    errdefer discard(DeleteObject(font))
+    errdefer _ = DeleteObject(font)
     let dc = CreateCompatibleDC(none) else error(failed, "could not create a font context")
-    errdefer discard(DeleteDC(dc))
-    discard(SelectObject(dc, font) else error(failed, "could not select the font"))
+    errdefer _ = DeleteDC(dc)
+    _ = SelectObject(dc, font) else error(failed, "could not select the font")
     var metrics: FontMetrics
     if GetTextMetricsW(dc, &metrics) == 0:
         error(failed, "could not read the font's metrics")
@@ -222,7 +222,7 @@ func win_draw_run(face: const TypeFace*, text: str, x: f64, baseline: f64, bitma
         if length == 4294967295 or length > 16777216:
             error(failed, "could not rasterize the font glyph")
         if length > 0:
-            let native = try alloc u8[(usize)length] in memory.heap
+            let native = try new u8[(usize)length] --- in memory.heap
             defer free(native) in memory.heap
             if GetGlyphOutlineW(dc, character, 6, &metrics, length, native.data, &matrix) == 4294967295:
                 error(failed, "could not read font coverage")
@@ -245,7 +245,7 @@ func win_draw_run(face: const TypeFace*, text: str, x: f64, baseline: f64, bitma
 ## EnumFontFamiliesExW's callbacks: each family, or each style, into the
 ## Names whose address is `parameter`; vertical ("@") faces are skipped.
 func win_family_found(font: const EnumLogFont*, metrics: const void*, kind: u32, parameter: isize) -> i32:
-    discard(metrics)
+    _ = metrics
     # Outline fonts only: raster ones ("8514oem") cannot be set at any size.
     # Symbol and icon fonts (Wingdings, "Segoe MDL2 Assets") are not type.
     if (kind & 1) == 0 and font.font.charset != 2 and win_has_latin(&font.font):
@@ -256,11 +256,11 @@ func win_family_found(font: const EnumLogFont*, metrics: const void*, kind: u32,
 ## character set ("HoloLens MDL2 Assets") have none.
 func win_has_latin(description: const FontLog*) -> bool:
     let handle = CreateFontIndirectW(description) else return false
-    defer discard(DeleteObject(handle))
+    defer _ = DeleteObject(handle)
     let dc = CreateCompatibleDC(none) else return false
-    defer discard(DeleteDC(dc))
+    defer _ = DeleteDC(dc)
     let original = SelectObject(dc, handle) else return false
-    defer discard(SelectObject(dc, original))
+    defer _ = SelectObject(dc, original)
     let letters: u16[4] = [65, 90, 97, 122]
     var glyphs: u16[4] = [0, 0, 0, 0]
     # GGI_MARK_NONEXISTING_GLYPHS: a missing letter maps to 0xFFFF.
@@ -272,8 +272,8 @@ func win_has_latin(description: const FontLog*) -> bool:
     return true
 
 func win_style_found(font: const EnumLogFont*, metrics: const void*, kind: u32, parameter: isize) -> i32:
-    discard(metrics)
-    discard(kind)
+    _ = metrics
+    _ = kind
     win_add_name(font.style[..<32], parameter)
     return 1
 
@@ -293,7 +293,7 @@ func win_add_name(source: const u16[], parameter: isize):
 
 func win_enumerate(family: str, listing_styles: bool, names: Names*) -> !:
     let dc = CreateCompatibleDC(none) else error(failed, "could not create a font context")
-    defer discard(DeleteDC(dc))
+    defer _ = DeleteDC(dc)
     var description = FontLog(charset = 1)
     if family.length > 0:
         let text = try family_bytes(family)
@@ -304,7 +304,7 @@ func win_enumerate(family: str, listing_styles: bool, names: Names*) -> !:
             error(failed, "Windows font families support at most 31 UTF-16 units")
         for index in 0..<wide.length:
             description.family[index] = wide[index]
-    discard(EnumFontFamiliesExW(dc, &description, win_style_found if listing_styles else win_family_found, (isize)(void*)names, 0))
+    _ = EnumFontFamiliesExW(dc, &description, win_style_found if listing_styles else win_family_found, (isize)(void*)names, 0)
 
 func win_families(names: Names*) -> !:
     try win_enumerate("", false, names)

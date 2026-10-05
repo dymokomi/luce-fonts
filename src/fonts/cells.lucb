@@ -48,29 +48,29 @@ test "ASCII, Latin and controls take one cell":
     assert(cells(0xE9) == 1 and cells(0x2014) == 1 and cells(0x0416) == 1)
 
 test "CJK, kana, Hangul syllables and full-width forms take two cells":
-    assert(cells(0x7530) == 2 and cells(0x4E2D) == 2)     # 田 中
-    assert(cells(0x3042) == 2 and cells(0x30A2) == 2)     # あ ア
-    assert(cells(0xAC00) == 2 and cells(0xD7A3) == 2)     # 가 힣
-    assert(cells(0x1100) == 2 and cells(0x115F) == 2)     # leading jamo
-    assert(cells(0xFF01) == 2 and cells(0xFF21) == 2)     # ！ Ａ
-    assert(cells(0x3000) == 2)                            # ideographic space
-    assert(cells(0xFF61) == 1)                            # half-width katakana stays narrow
+    assert(cells(0x7530) == 2 and cells(0x4E2D) == 2)  # 田 中
+    assert(cells(0x3042) == 2 and cells(0x30A2) == 2)  # あ ア
+    assert(cells(0xAC00) == 2 and cells(0xD7A3) == 2)  # 가 힣
+    assert(cells(0x1100) == 2 and cells(0x115F) == 2)  # leading jamo
+    assert(cells(0xFF01) == 2 and cells(0xFF21) == 2)  # ！ Ａ
+    assert(cells(0x3000) == 2)  # ideographic space
+    assert(cells(0xFF61) == 1)  # half-width katakana stays narrow
 
 test "astral CJK and emoji presentation take two cells":
     assert(cells(0x20000) == 2 and cells(0x2A6DF) == 2 and cells(0x30000) == 2)
     assert(cells(0x1F600) == 2 and cells(0x1F680) == 2 and cells(0x231A) == 2)
-    assert(cells(0x2614) == 2)                            # ☔ has emoji presentation
-    assert(cells(0x2603) == 1)                            # ☃ is text by default
+    assert(cells(0x2614) == 2)  # ☔ has emoji presentation
+    assert(cells(0x2603) == 1)  # ☃ is text by default
 
 test "combining marks and invisible scalars take none":
     assert(cells(0x0300) == 0 and cells(0x0301) == 0 and cells(0x036F) == 0)
-    assert(cells(0x20DD) == 0)                            # enclosing circle (Me)
-    assert(cells(0x3099) == 0)                            # combining kana voiced mark
+    assert(cells(0x20DD) == 0)  # enclosing circle (Me)
+    assert(cells(0x3099) == 0)  # combining kana voiced mark
     assert(cells(0x200B) == 0 and cells(0x200D) == 0 and cells(0x200F) == 0)
     assert(cells(0x2060) == 0 and cells(0x2064) == 0 and cells(0xFEFF) == 0)
     assert(cells(0xFE0F) == 0 and cells(0xE0100) == 0 and cells(0xE01EF) == 0)
-    assert(cells(0x1160) == 0 and cells(0x11FF) == 0)     # medial and final jamo
-    assert(cells(0x0903) == 1)                            # a spacing mark (Mc) keeps its cell
+    assert(cells(0x1160) == 0 and cells(0x11FF) == 0)  # medial and final jamo
+    assert(cells(0x0903) == 1)  # a spacing mark (Mc) keeps its cell
     assert(cells(0x2065) == 1 and cells(0x1200) == 1)
 
 test "text cells sum the scalars and reject malformed UTF-8":
@@ -84,7 +84,7 @@ test "text cells sum the scalars and reject malformed UTF-8":
     assert(try text_cells("\u{20000}x") == 3)
     var malformed: u8[2] = [0xE7, 0x94]
     var rejected = false
-    discard(text_cells((str)malformed[..<2])) catch failure:
+    _ = text_cells((str)malformed[..<2]) catch failure:
         assert(failure.code == failed)
         rejected = true
     assert(rejected)

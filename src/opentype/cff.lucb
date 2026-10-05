@@ -520,7 +520,7 @@ func sfnt_cff_run(interpreter: SfntCffInterpreter*, code: const u8[], nesting: u
                 return
             14:
                 # endchar
-                discard(cff_take_width(interpreter, false, 0))
+                _ = cff_take_width(interpreter, false, 0)
                 cff_close_contour(interpreter)
                 interpreter.ended = true
                 return

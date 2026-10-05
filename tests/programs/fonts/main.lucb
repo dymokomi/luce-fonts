@@ -45,7 +45,7 @@ pub func main(arguments: str[]) -> i32!:
         unexpected.close()
     var invalid_bytes: u8[1] = [255]
     var malformed = false
-    discard(face.measure((str)invalid_bytes[..<1])) catch failure:
+    _ = face.measure((str)invalid_bytes[..<1]) catch failure:
         assert(failure.code == fonts.failed)
         malformed = true
     assert(malformed)

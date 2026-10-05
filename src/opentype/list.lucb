@@ -37,13 +37,13 @@ pub struct List[T]:
         return &self.items[self.used - 1]
 
     ## Room for at least `capacity` items without growing again.
-    pub mutating func reserve(capacity: usize):
+    pub func reserve(capacity: usize):
         if capacity <= self.items.length:
             return
         if self.allocator == none:
             self.allocator = memory.allocator
         var allocator = self.allocator else trap("a list without an allocator")
-        let larger = (alloc T[capacity] in allocator) else trap("out of memory")
+        let larger = (new T[capacity] --- in allocator) else trap("out of memory")
         if self.used > 0:
             memory.copy(larger, self.items, self.used)
         if self.items.length > 0:
@@ -51,14 +51,14 @@ pub struct List[T]:
         self.items = larger
 
     ## Append `value`.
-    pub mutating func push(value: T):
+    pub func push(value: T):
         if self.used == self.items.length:
             self.reserve(8 if self.items.length == 0 else self.items.length * 2)
         self.items[self.used] = value
         self.used += 1
 
     ## Insert `value` before item `index` (at most `length()`).
-    pub mutating func insert(index: usize, value: T):
+    pub func insert(index: usize, value: T):
         assert(index <= self.used)
         self.push(value)
         var at = self.used - 1
@@ -68,21 +68,21 @@ pub struct List[T]:
         self.items[index] = value
 
     ## Remove item `index`, moving the ones after it down.
-    pub mutating func remove(index: usize):
+    pub func remove(index: usize):
         assert(index < self.used)
         for at in index..<self.used - 1:
             self.items[at] = self.items[at + 1]
         self.used -= 1
 
     ## Make the list `length` items long; new items are zero.
-    pub mutating func resize(length: usize):
+    pub func resize(length: usize):
         if length > self.used:
             self.reserve(length)
-            memory.set(u8[]((u8*)&self.items[self.used], (length - self.used) * sizeof(T)), 0)
+            memory.set(u8[]((u8*)&self.items[self.used], (length - self.used) * memory.size_of(T)), 0)
         self.used = length
 
     ## Forget every item; the storage is kept for reuse.
-    pub mutating func clear():
+    pub func clear():
         self.used = 0
 
     ## An independent copy of the list, in the current allocator.
@@ -95,7 +95,7 @@ pub struct List[T]:
         return copy
 
     ## Free the storage; the list is empty afterwards.
-    pub mutating func release():
+    pub func release():
         if self.items.length > 0:
             var allocator = self.allocator else trap("a list without an allocator")
             free(self.items) in allocator

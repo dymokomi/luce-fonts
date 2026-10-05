@@ -94,7 +94,7 @@ pub struct SfntOutline:
     pub var contour_ends: List[usize]
 
     ## Free the points, tags and contour ends.
-    pub mutating func release():
+    pub func release():
         self.xs.release()
         self.ys.release()
         self.tags.release()
@@ -121,7 +121,7 @@ pub struct GlyphPath:
     pub var points: List[GlyphPoint]
 
     ## Free the verbs and points; the path is empty afterwards.
-    pub mutating func release():
+    pub func release():
         self.verbs.release()
         self.points.release()
 

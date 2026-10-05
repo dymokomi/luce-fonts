@@ -178,7 +178,6 @@ func linux_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
 
 # mark: Proportional type ======================================================================
 
-
 func linux_type(family: str, style: str, size: f64) -> LoadedType!:
     let api = try cairo()
     let name = try family_bytes(family)
@@ -274,7 +273,7 @@ func fontconfig() -> FontconfigApi!:
         object_set_destroy = (func(void*) -> unit)(try cairo_symbol(library, "FcObjectSetDestroy")),
         font_list = (func(void*?, void*, void*) -> FcFontSet*?)(try cairo_symbol(library, "FcFontList")),
         font_set_destroy = (func(FcFontSet*) -> unit)(try cairo_symbol(library, "FcFontSetDestroy")))
-    discard(api.init_load())
+    _ = api.init_load()
     loaded_fontconfig = api
     return api
 
@@ -282,7 +281,7 @@ func fontconfig() -> FontconfigApi!:
 ## when fontconfig is missing.
 func linux_families(names: Names*) -> !:
     let api = fontconfig() catch failure:
-        discard(failure)
+        _ = failure
         for name in ["Sans", "Serif", "Monospace"]:
             try names.add(name)
         return
@@ -291,7 +290,7 @@ func linux_families(names: Names*) -> !:
 ## The styles `family` comes in, from fontconfig.
 func linux_styles(family: str, names: Names*) -> !:
     let api = fontconfig() catch failure:
-        discard(failure)
+        _ = failure
         for name in ["Regular", "Bold", "Italic", "Bold Italic"]:
             try names.add(name)
         return
@@ -304,10 +303,10 @@ func linux_list(api: FontconfigApi, family: str, property: c.str, names: Names*)
     if family.length > 0:
         let name = try family_bytes(family)
         defer free(name)
-        discard(api.pattern_add_string(pattern, "family", (c.str)name.data))
+        _ = api.pattern_add_string(pattern, "family", (c.str)name.data)
     let wanted = api.object_set_create()
     defer api.object_set_destroy(wanted)
-    discard(api.object_set_add(wanted, property))
+    _ = api.object_set_add(wanted, property)
     let found = api.font_list(none, pattern, wanted) else error(failed, "fontconfig could not list the fonts")
     defer api.font_set_destroy(found)
     for index in 0..<(usize)found.count:

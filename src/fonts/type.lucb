@@ -20,8 +20,8 @@ pub struct Names:
     var starts: usize[]
     var count: usize
 
-    pub static func create() -> Names!:
-        return Names(bytes = try alloc u8[4096] in memory.heap, used = 0, starts = try alloc usize[64] in memory.heap, count = 0)
+    pub func create() -> Names!:
+        return Names(bytes = try new u8[4096] --- in memory.heap, used = 0, starts = try new usize[64] --- in memory.heap, count = 0)
 
     ## How many names.
     pub func length() -> usize:
@@ -45,19 +45,19 @@ pub struct Names:
         return false
 
     ## Add `name` unless it is there already, keeping the list sorted.
-    mutating func add(name: str) -> !:
+    func add(name: str) -> !:
         if name.length == 0 or self.contains(name):
             return
         if self.used + name.length > self.bytes.length:
             var room = self.bytes.length * 2
             while room < self.used + name.length:
                 room *= 2
-            let grown = try alloc u8[room] in memory.heap
+            let grown = try new u8[room] --- in memory.heap
             memory.copy(grown, self.bytes, self.used)
             free(self.bytes) in memory.heap
             self.bytes = grown
         if self.count == self.starts.length:
-            let grown = try alloc usize[self.starts.length * 2] in memory.heap
+            let grown = try new usize[self.starts.length * 2] --- in memory.heap
             memory.copy(grown, self.starts, self.count)
             free(self.starts) in memory.heap
             self.starts = grown
@@ -81,7 +81,7 @@ pub struct Names:
         self.used += name.length
         self.count += 1
 
-    pub mutating func close():
+    pub func close():
         if self.bytes.length > 0:
             free(self.bytes) in memory.heap
         if self.starts.length > 0:
@@ -198,7 +198,7 @@ pub struct TypeFace:
             return try win_measure_run(&self, text)
         return try linux_measure_run(&self, text)
 
-    pub mutating func close():
+    pub func close():
         if let native = self.native:
             if platform.macos:
                 CFRelease(native)
@@ -255,7 +255,7 @@ pub struct SetText:
     pub var height: f64
     pub var lines: usize
 
-    pub mutating func close():
+    pub func close():
         self.bitmap.close()
 
 ## One line as laid out: where in the text it runs, and its width.
@@ -276,7 +276,7 @@ pub func set_text(face: const TypeFace*, text: str, setting: Setting) -> SetText
     if not math.is_finite(setting.tracking) or not (setting.leading >= 0.0 and setting.leading <= 10000.0):
         error(failed, "tracking must be finite and leading 0..10000 pixels")
     let spacing = setting.tracking / 1000.0 * face.size
-    var lines = try alloc Line[text.length + 1] in memory.heap
+    var lines = try new Line[text.length + 1] --- in memory.heap
     defer free(lines) in memory.heap
     let count = try break_lines(face, text, setting.width, spacing, lines)
     let pitch = setting.leading if setting.leading > 0.0 else face.line_height()
@@ -291,7 +291,7 @@ pub func set_text(face: const TypeFace*, text: str, setting: Setting) -> SetText
     let rows = (usize)math.ceil(box_height + margin * 2.0)
     if columns * rows > 67108864:
         error(failed, "set text exceeds the 64 MiB image limit")
-    let pixels = try alloc u8[columns * rows] in memory.heap
+    let pixels = try new u8[columns * rows] --- in memory.heap
     for at in 0..<pixels.length:
         pixels[at] = 0
     var bitmap = Bitmap(pixels, (u32)columns, (u32)rows, margin)

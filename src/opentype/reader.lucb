@@ -246,7 +246,7 @@ pub func sfnt_face_create(data: const u8[], ttc_index: u32) -> SfntFace*!:
     # opens one: a face allocates nothing once it is made, so it never mixes the allocator of
     # its typeface with whatever is current later.
     if face.outline_format == SfntOutlineFormat.cff:
-        discard(sfnt_face_cff_font(face))
+        _ = sfnt_face_cff_font(face)
     return face
 
 ## The table `tag` of the face, or none when it has no such table.
@@ -465,7 +465,7 @@ func sfnt_face_get_name(face: const SfntFace*, name_id: u16) -> str?:
         ascii.push((u8)code)
     if ascii.length() == 0:
         return ""
-    let name = alloc u8[ascii.length()] else trap("out of memory")
+    let name = new u8[ascii.length()] --- else trap("out of memory")
     memory.copy(name, ascii.view(), ascii.length())
     ascii.release()
     return (str)name

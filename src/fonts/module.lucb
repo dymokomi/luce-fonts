@@ -35,7 +35,7 @@ pub struct Bitmap:
     pub var padding: f64
 
     ## Release the pixels and reset to an empty bitmap.
-    pub mutating func close():
+    pub func close():
         if self.pixels.length > 0:
             free(self.pixels) in memory.heap
         self = Bitmap()
@@ -109,7 +109,7 @@ pub struct Face:
         return bitmap
 
     ## Release the native face.
-    pub mutating func close():
+    pub func close():
         if let native = self.native:
             if platform.macos:
                 CFRelease(native)
@@ -170,7 +170,7 @@ func load_face(size: f64, family: str) -> NativeFace!:
     error(failed, "native fonts are unavailable on this target")
 
 func family_bytes(text: str) -> u8[]!:
-    let bytes = try alloc u8[text.length + 1]
+    let bytes = try new u8[text.length + 1] ---
     memory.copy(bytes, text.bytes, text.length)
     bytes[text.length] = 0
     return bytes

@@ -50,7 +50,7 @@ func mac_face(size: f64, family: str) -> NativeFace!:
         error(failed, "the requested font must be monospace")
     var character: u16 = 77
     var glyph: u16 = 0
-    discard(CTFontGetGlyphsForCharacters(native, &character, &glyph, 1))
+    _ = CTFontGetGlyphsForCharacters(native, &character, &glyph, 1)
     let advance = CTFontGetAdvancesForGlyphs(native, 0, &glyph, none, 1)
     return NativeFace(native, none, advance, CTFontGetAscent(native), CTFontGetDescent(native))
 
@@ -87,7 +87,7 @@ func mac_raster(face: Face, text: str, scale: f64, bitmap: Bitmap*) -> !:
             fallback = CTFontCreateForString(font, string, FontRange(0, count))
             if let replacement = fallback:
                 chosen = replacement
-                discard(CTFontGetGlyphsForCharacters(chosen, &characters[0], &glyphs[0], count))
+                _ = CTFontGetGlyphsForCharacters(chosen, &characters[0], &glyphs[0], count)
         let width = cells(scalar)
         let glyph = CTFontGetAdvancesForGlyphs(chosen, 0, &glyphs[0], none, 1) / scale
         let x = (f64)column * face.advance + glyph_offset(width, glyph, face.advance)
