@@ -1,0 +1,428 @@
+#==============================================================================================
+#
+#   woff2_glyf - WOFF2's table transforms: glyf and loca rebuilt, and hmtx
+#
+#   DESCRIPTION:
+#       The transformed glyf table (WOFF2 section 5.1) is a header and seven streams:
+#       contour counts, point counts (255UInt16), point flags, glyph data (point triplets
+#       and instruction lengths), composite glyph data, bounding boxes behind a bitmap of
+#       the glyphs that have one, and instructions; then, when the header's flags ask for
+#       it, a bitmap of the simple glyphs whose first point carries OVERLAP_SIMPLE. The
+#       rebuild (the reference's ReconstructGlyf) writes each glyph as TrueType stores it,
+#       with flags packed and repeated and coordinates in their shortest form, 4-byte
+#       aligned, then the loca table of the declared format. The transformed hmtx (section
+#       5.4) leaves out left side bearings that equal the glyphs' xMin; the rebuild
+#       (ReconstructTransformedHmtx) restores them from what the glyf rebuild learned.
+#
+#==============================================================================================
+
+# mark: Glyph points ===========================================================================
+
+# Simple glyph flags, composite glyph flags, and the glyf transform's option flag.
+let woff2_glyf_on_curve: i32 = 1
+let woff2_glyf_x_short: i32 = 2
+let woff2_glyf_y_short: i32 = 4
+let woff2_glyf_repeat: u8 = 8
+let woff2_glyf_this_x_is_same: i32 = 16
+let woff2_glyf_this_y_is_same: i32 = 32
+let woff2_glyf_overlap_simple: i32 = 64
+let woff2_composite_arg_words: u16 = 1
+let woff2_composite_scale: u16 = 8
+let woff2_composite_more: u16 = 32
+let woff2_composite_xy_scale: u16 = 64
+let woff2_composite_two_by_two: u16 = 128
+let woff2_composite_instructions: u16 = 256
+let woff2_glyf_overlap_bitmap: u16 = 1
+
+## A point of a glyph being rebuilt (the reference's Point).
+struct Woff2Point:
+    var x: i32
+    var y: i32
+    var on_curve: bool
+
+## WithSign: `base` when the flag's low bit is set, its negation otherwise.
+func woff2_with_sign(flag: u32, base: u32) -> i64:
+    return (i64)base if (flag & 1) != 0 else -(i64)base
+
+## Store16: the low 16 bits of `value`, big-endian, at `offset` of `data`.
+func woff2_put_16(data: u8[], offset: usize, value: i64):
+    woff_put_u16(data, offset, (u16)value)
+
+## TripletDecode: the points of a simple glyph from their `flags` and coordinate `data`
+## (WOFF2 section 5.2's 128 encodings); the bytes of `data` they took.
+func woff2_decode_triplets(flags: const u8[], data: const u8[], points: Woff2Point[]) -> usize!:
+    if points.length > data.length:
+        error(invalid_font, "Truncated WOFF2 glyph data")
+    var x: i64 = 0
+    var y: i64 = 0
+    var at: usize = 0
+    for index in 0..<points.length:
+        let flag = (u32)(flags[index] & 0x7F)
+        let on_curve = (flags[index] >> 7) == 0
+        var size: usize = 4
+        if flag < 84:
+            size = 1
+        elif flag < 120:
+            size = 2
+        elif flag < 124:
+            size = 3
+        if size > data.length - at:
+            error(invalid_font, "Truncated WOFF2 glyph data")
+        let b0 = (u32)data[at]
+        var dx: i64 = 0
+        var dy: i64 = 0
+        if flag < 10:
+            dy = woff2_with_sign(flag, ((flag & 14) << 7) + b0)
+        elif flag < 20:
+            dx = woff2_with_sign(flag, (((flag - 10) & 14) << 7) + b0)
+        elif flag < 84:
+            let high = flag - 20
+            dx = woff2_with_sign(flag, 1 + (high & 0x30) + (b0 >> 4))
+            dy = woff2_with_sign(flag >> 1, 1 + ((high & 0x0C) << 2) + (b0 & 0x0F))
+        elif flag < 120:
+            let high = flag - 84
+            dx = woff2_with_sign(flag, 1 + ((high // 12) << 8) + b0)
+            dy = woff2_with_sign(flag >> 1, 1 + (((high % 12) >> 2) << 8) + (u32)data[at + 1])
+        elif flag < 124:
+            let b1 = (u32)data[at + 1]
+            dx = woff2_with_sign(flag, (b0 << 4) + (b1 >> 4))
+            dy = woff2_with_sign(flag >> 1, ((b1 & 0x0F) << 8) + (u32)data[at + 2])
+        else:
+            dx = woff2_with_sign(flag, (b0 << 8) + (u32)data[at + 1])
+            dy = woff2_with_sign(flag >> 1, ((u32)data[at + 2] << 8) + (u32)data[at + 3])
+        at += size
+        # The reference's coordinates are ints, and it refuses one that would overflow.
+        x += dx
+        y += dy
+        if x < -2147483648 or x > 2147483647 or y < -2147483648 or y > 2147483647:
+            error(invalid_font, "WOFF2 glyph coordinates overflow")
+        points[index] = Woff2Point(x = (i32)x, y = (i32)y, on_curve = on_curve)
+    return at
+
+## StorePoints: the flags (with repeats) and the x and y coordinates of the simple glyph in
+## `glyph`, after its contour end points and `instruction_length` bytes of instructions;
+## the glyph's size.
+func woff2_store_points(points: const Woff2Point[], n_contours: usize, instruction_length: usize, overlap: bool, glyph: u8[]) -> usize!:
+    var flag_offset = 10 + 2 * n_contours + 2 + instruction_length
+    var last_flag: i32 = -1
+    var repeat_count: u32 = 0
+    var last_x: i64 = 0
+    var last_y: i64 = 0
+    var x_bytes: usize = 0
+    var y_bytes: usize = 0
+    for index in 0..<points.length:
+        let point = points[index]
+        var flag: i32 = woff2_glyf_on_curve if point.on_curve else 0
+        if overlap and index == 0:
+            flag |= woff2_glyf_overlap_simple
+        let dx = (i64)point.x - last_x
+        if dx == 0:
+            flag |= woff2_glyf_this_x_is_same
+        elif dx > -256 and dx < 256:
+            flag |= woff2_glyf_x_short | (woff2_glyf_this_x_is_same if dx > 0 else 0)
+            x_bytes += 1
+        else:
+            x_bytes += 2
+        let dy = (i64)point.y - last_y
+        if dy == 0:
+            flag |= woff2_glyf_this_y_is_same
+        elif dy > -256 and dy < 256:
+            flag |= woff2_glyf_y_short | (woff2_glyf_this_y_is_same if dy > 0 else 0)
+            y_bytes += 1
+        else:
+            y_bytes += 2
+        if flag == last_flag and repeat_count != 255:
+            glyph[flag_offset - 1] |= woff2_glyf_repeat
+            repeat_count += 1
+        else:
+            if repeat_count != 0:
+                if flag_offset >= glyph.length:
+                    error(invalid_font, "WOFF2 glyph overflows its buffer")
+                glyph[flag_offset] = (u8)repeat_count
+                flag_offset += 1
+            if flag_offset >= glyph.length:
+                error(invalid_font, "WOFF2 glyph overflows its buffer")
+            glyph[flag_offset] = (u8)flag
+            flag_offset += 1
+            repeat_count = 0
+        last_x = (i64)point.x
+        last_y = (i64)point.y
+        last_flag = flag
+    if repeat_count != 0:
+        if flag_offset >= glyph.length:
+            error(invalid_font, "WOFF2 glyph overflows its buffer")
+        glyph[flag_offset] = (u8)repeat_count
+        flag_offset += 1
+    if x_bytes + y_bytes > glyph.length - flag_offset:
+        error(invalid_font, "WOFF2 glyph overflows its buffer")
+
+    var x_offset = flag_offset
+    var y_offset = flag_offset + x_bytes
+    last_x = 0
+    last_y = 0
+    for index in 0..<points.length:
+        let dx = (i64)points[index].x - last_x
+        if dx != 0:
+            if dx > -256 and dx < 256:
+                glyph[x_offset] = (u8)(dx if dx > 0 else -dx)
+                x_offset += 1
+            else:
+                woff2_put_16(glyph, x_offset, dx)
+                x_offset += 2
+        last_x += dx
+        let dy = (i64)points[index].y - last_y
+        if dy != 0:
+            if dy > -256 and dy < 256:
+                glyph[y_offset] = (u8)(dy if dy > 0 else -dy)
+                y_offset += 1
+            else:
+                woff2_put_16(glyph, y_offset, dy)
+                y_offset += 2
+        last_y += dy
+    return y_offset
+
+## ComputeBbox: the bounding box of `points` (zero for none), at offset 2 of `glyph`.
+func woff2_compute_bbox(points: const Woff2Point[], glyph: u8[]):
+    var x_min: i64 = 0
+    var y_min: i64 = 0
+    var x_max: i64 = 0
+    var y_max: i64 = 0
+    if points.length > 0:
+        x_min = (i64)points[0].x
+        x_max = x_min
+        y_min = (i64)points[0].y
+        y_max = y_min
+    for index in 1..<points.length:
+        let x = (i64)points[index].x
+        let y = (i64)points[index].y
+        x_min = x if x < x_min else x_min
+        x_max = x if x > x_max else x_max
+        y_min = y if y < y_min else y_min
+        y_max = y if y > y_max else y_max
+    woff2_put_16(glyph, 2, x_min)
+    woff2_put_16(glyph, 4, y_min)
+    woff2_put_16(glyph, 6, x_max)
+    woff2_put_16(glyph, 8, y_max)
+
+## SizeOfComposite: the bytes of the composite glyph at `stream` (which is not advanced),
+## and whether a component asks for instructions.
+func woff2_size_of_composite(stream: Woff2Reader) -> (usize, bool)!:
+    var reader = stream
+    var have_instructions = false
+    var flags = woff2_composite_more
+    while (flags & woff2_composite_more) != 0:
+        flags = try reader.read_u16()
+        have_instructions = have_instructions or (flags & woff2_composite_instructions) != 0
+        # The glyph index and the two arguments.
+        var size: usize = 6 if (flags & woff2_composite_arg_words) != 0 else 4
+        if (flags & woff2_composite_scale) != 0:
+            size += 2
+        elif (flags & woff2_composite_xy_scale) != 0:
+            size += 4
+        elif (flags & woff2_composite_two_by_two) != 0:
+            size += 8
+        try reader.skip(size)
+    return (reader.at - stream.at, have_instructions)
+
+## A buffer of at least `size` bytes: `buffer`, or a larger one in its place.
+func woff2_buffer(buffer: u8[], size: usize) -> u8[]!:
+    if buffer.length >= size:
+        return buffer
+    let larger = try new u8[size]
+    if buffer.length > 0:
+        free(buffer)
+    return larger
+
+# mark: glyf and loca ==========================================================================
+
+## ReconstructGlyf: the glyf table of `font` rebuilt from its transform `data` and written
+## to `out` (at `glyf.dst_offset`), then the loca table; sets both tables' places, the
+## font's glyph count, loca format and xMins, and `loca_checksum`. The glyf checksum.
+func woff2_reconstruct_glyf(data: const u8[], glyf: Woff2Table*, loca: Woff2Table*, font: Woff2Font*, out: Woff2Out*, loca_checksum: u32*) -> u32!:
+    var file = Woff2Reader(data = data, at = 0)
+    let glyf_start = out.size
+    # version, which the reference does not check, then optionFlags.
+    _ = try file.read_u16()
+    let options = try file.read_u16()
+    font.num_glyphs = try file.read_u16()
+    font.index_format = try file.read_u16()
+    let num_glyphs = (usize)font.num_glyphs
+    # The loca table must be as long as its format and the glyph count make it.
+    let entry_size: u32 = 4 if font.index_format != 0 else 2
+    if loca.dst_length != entry_size * ((u32)font.num_glyphs + 1):
+        error(invalid_font, "WOFF2 loca length does not match the glyph count")
+
+    # The seven streams, in order, after the header and their sizes.
+    var offset: usize = 36
+    if offset > data.length:
+        error(invalid_font, "Truncated WOFF2 glyf transform")
+    var streams: Woff2Reader[7]
+    for index in 0..<7:
+        let size = (usize)(try file.read_u32())
+        if size > data.length - offset:
+            error(invalid_font, "Truncated WOFF2 glyf stream")
+        streams[index] = Woff2Reader(data = data[offset..<offset + size], at = 0)
+        offset += size
+    var n_contour_stream = streams[0]
+    var n_points_stream = streams[1]
+    var flag_stream = streams[2]
+    var glyph_stream = streams[3]
+    var composite_stream = streams[4]
+    var bbox_stream = streams[5]
+    var instruction_stream = streams[6]
+
+    # The overlap bitmap follows the streams when the options ask for it.
+    let has_overlap_bitmap = (options & woff2_glyf_overlap_bitmap) != 0
+    var overlap_bitmap = data[offset..<offset]
+    if has_overlap_bitmap:
+        let length = (num_glyphs + 7) >> 3
+        if length > data.length - offset:
+            error(invalid_font, "Truncated WOFF2 overlap bitmap")
+        overlap_bitmap = data[offset..<offset + length]
+    # The bbox stream starts with a bitmap of the glyphs that have an explicit box.
+    let bbox_bitmap = try bbox_stream.read_bytes(((num_glyphs + 31) >> 5) << 2)
+
+    let loca_values = try new u32[num_glyphs + 1]
+    defer free(loca_values)
+    var points: Woff2Point[]
+    defer:
+        if points.length > 0:
+            free(points)
+    var glyph: u8[]
+    defer:
+        if glyph.length > 0:
+            free(glyph)
+    glyph = try woff2_buffer(glyph, 5120)
+    var n_points: List[u32]
+    defer n_points.release()
+
+    var glyf_checksum: u32 = 0
+    font.x_mins.resize(num_glyphs)
+    for index in 0..<num_glyphs:
+        let have_bbox = (bbox_bitmap[index >> 3] & ((u8)0x80 >> (u8)(index & 7))) != 0
+        let n_contours = try n_contour_stream.read_u16()
+        var glyph_size: usize = 0
+        if n_contours == 0xFFFF:
+            # A composite glyph: its explicit box, components and instructions.
+            if not have_bbox:
+                error(invalid_font, "A WOFF2 composite glyph without a bounding box")
+            let (composite_size, have_instructions) = try woff2_size_of_composite(composite_stream)
+            var instruction_size: usize = 0
+            if have_instructions:
+                instruction_size = (usize)(try glyph_stream.read_255_u16())
+            glyph = try woff2_buffer(glyph, 12 + composite_size + instruction_size)
+            woff_put_u16(glyph, 0, n_contours)
+            memory.copy(glyph[2..], try bbox_stream.read_bytes(8), 8)
+            glyph_size = 10
+            memory.copy(glyph[glyph_size..], try composite_stream.read_bytes(composite_size), composite_size)
+            glyph_size += composite_size
+            if have_instructions:
+                woff_put_u16(glyph, glyph_size, (u16)instruction_size)
+                glyph_size += 2
+                memory.copy(glyph[glyph_size..], try instruction_stream.read_bytes(instruction_size), instruction_size)
+                glyph_size += instruction_size
+        elif n_contours > 0:
+            # A simple glyph: its points from the flag and triplet streams.
+            n_points.clear()
+            var total_points: usize = 0
+            for _ in 0..<(usize)n_contours:
+                let count = try n_points_stream.read_255_u16()
+                n_points.push(count)
+                total_points += (usize)count
+            if total_points > flag_stream.remaining():
+                error(invalid_font, "Truncated WOFF2 flag stream")
+            if points.length < total_points:
+                if points.length > 0:
+                    free(points)
+                var empty: Woff2Point[]
+                points = empty
+                points = try new Woff2Point[total_points]
+            let glyph_points = points[..<total_points]
+            let flags = flag_stream.data[flag_stream.at..<flag_stream.at + total_points]
+            let consumed = try woff2_decode_triplets(flags, glyph_stream.data[glyph_stream.at..], glyph_points)
+            try flag_stream.skip(total_points)
+            try glyph_stream.skip(consumed)
+            let instruction_size = (usize)(try glyph_stream.read_255_u16())
+            if total_points >= 1 << 27 or instruction_size >= 1 << 30:
+                error(invalid_font, "A WOFF2 glyph too large")
+            glyph = try woff2_buffer(glyph, 12 + 2 * (usize)n_contours + 5 * total_points + instruction_size)
+            woff_put_u16(glyph, 0, n_contours)
+            if have_bbox:
+                memory.copy(glyph[2..], try bbox_stream.read_bytes(8), 8)
+            else:
+                woff2_compute_bbox(glyph_points, glyph)
+            glyph_size = 10
+            var end_point: i64 = -1
+            for contour in 0..<(usize)n_contours:
+                end_point += (i64)*n_points.at(contour)
+                if end_point >= 65536:
+                    error(invalid_font, "A WOFF2 glyph with too many points")
+                woff2_put_16(glyph, glyph_size, end_point)
+                glyph_size += 2
+            woff_put_u16(glyph, glyph_size, (u16)instruction_size)
+            glyph_size += 2
+            memory.copy(glyph[glyph_size..], try instruction_stream.read_bytes(instruction_size), instruction_size)
+            glyph_size += instruction_size
+            let overlap = has_overlap_bitmap and (overlap_bitmap[index >> 3] & ((u8)0x80 >> (u8)(index & 7))) != 0
+            glyph_size = try woff2_store_points(glyph_points, (usize)n_contours, instruction_size, overlap, glyph)
+        elif have_bbox:
+            # An empty glyph must not have a box.
+            error(invalid_font, "A WOFF2 empty glyph with a bounding box")
+
+        loca_values[index] = (u32)(out.size - glyf_start)
+        try out.write(glyph[..<glyph_size])
+        try out.pad4()
+        glyf_checksum +%= woff2_checksum(glyph[..<glyph_size])
+        # The xMin the hmtx transform may stand for.
+        if n_contours > 0:
+            *font.x_mins.at(index) = sfnt_i16(glyph, 2)
+
+    glyf.dst_length = (u32)(out.size - (usize)glyf.dst_offset)
+    loca.dst_offset = (u32)out.size
+    loca_values[num_glyphs] = glyf.dst_length
+    # StoreLoca: offsets, halved in the short format.
+    let loca_bytes = try out.grow((num_glyphs + 1) * (usize)entry_size)
+    for index in 0..<num_glyphs + 1:
+        if font.index_format != 0:
+            woff_put_u32(loca_bytes, 4 * index, loca_values[index])
+        else:
+            woff_put_u16(loca_bytes, 2 * index, (u16)(loca_values[index] >> 1))
+    *loca_checksum = woff2_checksum(loca_bytes)
+    loca.dst_length = (u32)(out.size - (usize)loca.dst_offset)
+    return glyf_checksum
+
+# mark: hmtx =====================================================================================
+
+## ReconstructTransformedHmtx: the hmtx table of `font` from its transform `data`, written
+## to `out`: the advances, then the proportional and monospaced left side bearings that
+## the transform kept, the others being the glyphs' xMins. The table's checksum.
+func woff2_reconstruct_hmtx(data: const u8[], font: const Woff2Font*, out: Woff2Out*) -> u32!:
+    var input = Woff2Reader(data = data, at = 0)
+    let flags = try input.read_u8()
+    let has_proportional_lsbs = (flags & 1) == 0
+    let has_monospace_lsbs = (flags & 2) == 0
+    # Bits 2 to 7 are reserved, and a transform must leave out some bearings.
+    if (flags & 0xFC) != 0:
+        error(invalid_font, "Invalid WOFF2 hmtx flags")
+    if has_proportional_lsbs and has_monospace_lsbs:
+        error(invalid_font, "A WOFF2 hmtx transform that leaves nothing out")
+    let num_glyphs = (usize)font.num_glyphs
+    let num_hmetrics = (usize)font.num_hmetrics
+    if font.x_mins.length() != num_glyphs:
+        error(invalid_font, "A WOFF2 hmtx transform without its glyf")
+    if num_hmetrics > num_glyphs or num_hmetrics < 1:
+        error(invalid_font, "Invalid WOFF2 numberOfHMetrics")
+
+    let table = try out.grow(2 * num_glyphs + 2 * num_hmetrics)
+    for index in 0..<num_hmetrics:
+        woff_put_u16(table, 4 * index, try input.read_u16())
+    for index in 0..<num_glyphs:
+        var lsb: i16 = 0
+        let kept = has_proportional_lsbs if index < num_hmetrics else has_monospace_lsbs
+        if kept:
+            lsb = (i16)(try input.read_u16())
+        else:
+            lsb = *font.x_mins.at(index)
+        let at = 4 * index + 2 if index < num_hmetrics else 2 * num_hmetrics + 2 * index
+        woff_put_u16(table, at, (u16)lsb)
+    return woff2_checksum(table)

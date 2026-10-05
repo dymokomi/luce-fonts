@@ -1,0 +1,203 @@
+#==============================================================================================
+#
+#   tests_woff2 - the WOFF2 decoder against Google's reference decoder
+#
+#   DESCRIPTION:
+#       tests/woff2 holds WOFF2 files made from this package's test fonts by the reference
+#       encoders (woff2_compress; fontTools for the hmtx transform, which woff2_compress
+#       never applies) and the sfnt that Google's woff2_decompress makes of each: a
+#       TrueType font with composite glyphs and instructions, a CFF font, one with the hmtx
+#       transform and OVERLAP_SIMPLE bits, and a collection whose fonts share their glyf
+#       table. Each must decode byte for byte as the reference decodes it. The decoded
+#       Lato-Bold is checked against the original font glyph by glyph; the variable-length
+#       numbers and the triplet coding are checked on hand-made bytes; and mutated files
+#       must fail or decode, never trap.
+#
+#==============================================================================================
+
+# mark: Helpers ================================================================================
+
+## The fixtures: WOFF2 files of tests/woff2 with the reference's sfnt of each.
+let test_woff2_fixtures: str[4] = ["Lato-Bold", "NotoSansTifinagh-Regular", "SerenitySans-Transformed", "SerenitySans-Collection"]
+
+## The file `name` with `extension` of tests/woff2.
+func test_woff2_file(name: str, extension: str) -> const u8[]:
+    var buffer: u8[256]
+    let path = strings.format(buffer, f"tests/woff2/{name}{extension}") else trap("a test path is too long")
+    return test_read_file(path)
+
+## The face `ttc_index` of `data`, which must open.
+func test_woff2_face(data: const u8[], ttc_index: u32) -> SfntFace*:
+    return sfnt_face_create(data, ttc_index) else trap("a decoded WOFF2 font does not open")
+
+## Whether the two glyph paths are the same, verb for verb and bit for bit.
+func test_same_path(a: const GlyphPath*, b: const GlyphPath*) -> bool:
+    if a.verbs.length() != b.verbs.length() or a.points.length() != b.points.length():
+        return false
+    for index in 0..<a.verbs.length():
+        if *a.verbs.at(index) != *b.verbs.at(index):
+            return false
+    for index in 0..<a.points.length():
+        let p = *a.points.at(index)
+        let q = *b.points.at(index)
+        if p.x != q.x or p.y != q.y:
+            return false
+    return true
+
+## Whether reading a UIntBase128 from `bytes` fails with invalid_font.
+func test_base128_fails(bytes: const u8[]) -> bool:
+    var reader = Woff2Reader(data = bytes, at = 0)
+    let value: u32? = reader.read_base128() catch failure:
+        assert(failure.code == invalid_font)
+        recover none
+    return value == none
+
+# mark: Byte for byte ===========================================================================
+
+test "WOFF2 fixtures decode as the reference decodes them":
+    with memory.heap:
+        for name in test_woff2_fixtures:
+            let sfnt = woff2_to_sfnt(test_woff2_file(name, ".woff2")) else trap("a WOFF2 fixture does not decode")
+            let expected = test_woff2_file(name, ".sfnt")
+            if sfnt.length != expected.length:
+                print(f"{name}: {sfnt.length} bytes, the reference makes {expected.length}")
+            assert(sfnt.length == expected.length)
+            for index in 0..<sfnt.length:
+                if sfnt[index] != expected[index]:
+                    print(f"{name}: byte {index} is {sfnt[index]}, the reference's {expected[index]}")
+                    trap("a WOFF2 fixture decodes differently")
+            free(sfnt)
+
+test "a decoded WOFF2 font has the original's glyphs":
+    with memory.heap:
+        let sfnt = woff2_to_sfnt(test_woff2_file("Lato-Bold", ".woff2")) else trap("Lato-Bold.woff2 does not decode")
+        let decoded = test_woff2_face(sfnt, 0)
+        let original = test_face("Lato-Bold.ttf")
+        assert(decoded.num_glyphs == original.num_glyphs and decoded.family_name == original.family_name)
+        for glyph in 0..<(u32)decoded.num_glyphs:
+            assert(sfnt_face_advance(decoded, glyph) == sfnt_face_advance(original, glyph))
+            assert(sfnt_face_left_side_bearing(decoded, glyph) == sfnt_face_left_side_bearing(original, glyph))
+            var a = sfnt_face_glyph_path(decoded, glyph, 64.0)
+            var b = sfnt_face_glyph_path(original, glyph, 64.0)
+            assert(test_same_path(&a, &b))
+            a.release()
+            b.release()
+        sfnt_face_destroy(decoded)
+        free(sfnt)
+
+test "the hmtx transform restores left side bearings from xMin":
+    with memory.heap:
+        let sfnt = woff2_to_sfnt(test_woff2_file("SerenitySans-Transformed", ".woff2")) else trap("the hmtx fixture does not decode")
+        let face = test_woff2_face(sfnt, 0)
+        var checked: usize = 0
+        for glyph in 0..<(u32)face.num_glyphs:
+            if let range = sfnt_glyf_range(face, glyph):
+                if range.1 > range.0:
+                    assert(sfnt_face_left_side_bearing(face, glyph) == sfnt_i16(face.glyf, range.0 + 2))
+                    checked += 1
+        assert(checked > 0)
+        sfnt_face_destroy(face)
+        free(sfnt)
+
+test "a WOFF2 collection decodes to its fonts, sharing tables":
+    with memory.heap:
+        let sfnt = woff2_to_sfnt(test_woff2_file("SerenitySans-Collection", ".woff2")) else trap("the collection does not decode")
+        assert(sfnt_u32(sfnt, 0) == woff2_ttc_flavor and sfnt_u32(sfnt, 8) == 2)
+        let first = test_woff2_face(sfnt, 0)
+        let second = test_woff2_face(sfnt, 1)
+        assert(first.family_name == "SerenitySans" and second.family_name == "CollectedSans")
+        # One glyf table serves both fonts.
+        assert(first.glyf.length > 0 and first.glyf.length == second.glyf.length)
+        assert(&first.glyf[0] == &second.glyf[0])
+        sfnt_face_destroy(first)
+        sfnt_face_destroy(second)
+        free(sfnt)
+
+# mark: Pieces ==================================================================================
+
+test "255UInt16 and UIntBase128 read as the reference reads them":
+    # 506 in each of its encodings, then the edges of each.
+    let shorts: u8[13] = [253, 0x01, 0xFA, 254, 0, 255, 253, 252, 255, 0, 254, 255, 253]
+    var reader = Woff2Reader(data = shorts, at = 0)
+    assert(try reader.read_255_u16() == 506)
+    assert(try reader.read_255_u16() == 506)
+    assert(try reader.read_255_u16() == 506)
+    assert(try reader.read_255_u16() == 252)
+    assert(try reader.read_255_u16() == 253)
+    assert(try reader.read_255_u16() == 761)
+    let past: u32? = reader.read_255_u16() catch:
+        recover none
+    assert(past == none)
+    let fine: u8[6] = [0x3F, 0x8F, 0xFF, 0xFF, 0xFF, 0x7F]
+    reader = Woff2Reader(data = fine, at = 0)
+    assert(try reader.read_base128() == 63)
+    assert(try reader.read_base128() == 0xFFFFFFFF)
+    # A leading zero, a sixth byte, an overflow past 32 bits and a truncation fail.
+    let leading: u8[2] = [0x80, 0x01]
+    let long: u8[6] = [0x81, 0x80, 0x80, 0x80, 0x80, 0x00]
+    let overflow: u8[5] = [0x90, 0x80, 0x80, 0x80, 0x00]
+    let truncated: u8[1] = [0x81]
+    assert(test_base128_fails(leading))
+    assert(test_base128_fails(long))
+    assert(test_base128_fails(overflow))
+    assert(test_base128_fails(truncated))
+
+test "point triplets decode with their signs and sizes":
+    # One point of each encoding size: a y delta, an x delta, a nibble pair, a byte pair,
+    # 12-bit pairs and 16-bit pairs, signs from the flag's low bits; the top bit marks
+    # an off-curve point.
+    let flags: u8[6] = [0x81, 10, 20, 84, 120, 127]
+    let data: u8[12] = [0x05, 0x07, 0x12, 0x10, 0x20, 0x12, 0x34, 0x56, 0x01, 0x02, 0x03, 0x04]
+    var points: Woff2Point[6]
+    let used = try woff2_decode_triplets(flags, data, points)
+    assert(used == 12)
+    assert(points[0].x == 0 and points[0].y == 5 and not points[0].on_curve)
+    assert(points[1].x == -7 and points[1].y == 5 and points[1].on_curve)
+    assert(points[2].x == -9 and points[2].y == 2)
+    assert(points[3].x == -26 and points[3].y == -31)
+    assert(points[4].x == -26 - 0x123 and points[4].y == -31 - 0x456)
+    assert(points[5].x == -26 - 0x123 + 0x0102 and points[5].y == -31 - 0x456 + 0x0304)
+    # Too few bytes for the points fails.
+    let short_flags: u8[2] = [0, 0]
+    let failed: usize? = woff2_decode_triplets(short_flags, data[..<1], points[..<2]) catch:
+        recover none
+    assert(failed == none)
+
+# mark: Damaged files ===========================================================================
+
+test "mutated WOFF2 files fail or decode, and never trap":
+    with memory.heap:
+        var state: u64 = 0x9E3779B97F4A7C15
+        var decoded: usize = 0
+        for name in test_woff2_fixtures:
+            let original = test_woff2_file(name, ".woff2")
+            let file = new u8[original.length] else trap("out of memory")
+            for round in 0..<200:
+                memory.copy(file, original, original.length)
+                var length = file.length
+                # A few changes, mostly in the header and directories where the checks are.
+                for _ in 0..<1 + round % 4:
+                    state = state *% 6364136223846793005 +% 1442695040888963407
+                    let pick = (usize)(state >> 33)
+                    let at = pick % 160 if (state & 3) != 0 else pick % file.length
+                    match (state >> 8) % 4:
+                        0:
+                            file[at] ^= (u8)1 << (u8)((state >> 16) % 8)
+                        1:
+                            file[at] = (u8)(state >> 24)
+                        2:
+                            file[at] = 0xFF
+                        _:
+                            length = at
+                let sfnt: u8[]? = woff2_to_sfnt(file[..<length]) catch:
+                    recover none
+                if let data = sfnt:
+                    decoded += 1
+                    # Whatever decodes is an sfnt the reader may refuse, but not trap on.
+                    let face: SfntFace*? = sfnt_face_create(data, 0) catch:
+                        recover none
+                    if let opened = face:
+                        sfnt_face_destroy(opened)
+                    free(data)
+            free(file)
+        assert(decoded > 0)

@@ -31,10 +31,14 @@ test "malformed_woff":
     for test_input in test_inputs:
         assert(not test_woff_loads(test_read_file(test_input)))
 
-test "woff2_without_brotli":
-    # TestWOFF2's tolerate_incorrect_sfnt_size loads a WOFF2 font; there is no Brotli decoder
-    # (woff.lucb), so it is not ported. The conversion reports the failure instead.
-    assert(not test_woff2_converts(test_read_file("tests/woff/incorrect_sfnt_size.woff2")))
+test "tolerate_incorrect_sfnt_size":
+    # The header's totalSfntSize is wrong; WOFF2 decoders do not believe it.
+    let sfnt = woff2_to_sfnt(test_read_file("tests/woff/incorrect_sfnt_size.woff2")) else trap("incorrect_sfnt_size.woff2 does not convert")
+    let face = sfnt_face_create(sfnt, 0) else trap("incorrect_sfnt_size.woff2's sfnt does not open")
+    assert(face.family_name == "Test")
+    assert(face.num_glyphs == 4)
+    sfnt_face_destroy(face)
+    free(sfnt)
 
 test "malformed_woff2":
     let test_inputs: str[2] = ["tests/woff/incorrect_compressed_size.woff2", "tests/woff/invalid_numtables.woff2"]

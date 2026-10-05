@@ -1,0 +1,202 @@
+#==============================================================================================
+#
+#   woff2_rebuild - WOFF2: decompressing the tables and rebuilding each font's sfnt
+#
+#   DESCRIPTION:
+#       woff2_to_sfnt, as the reference's ConvertWOFF2ToTTF: the header and directories
+#       (woff2.lucb), the offset tables, the plausibility bound on the compression ratio,
+#       the one Brotli stream decoded to exactly its declared size, then each font's tables
+#       written in its order (ReconstructFont): untransformed tables copied (head with a zero
+#       checkSumAdjustment), glyf and loca rebuilt from the glyf transform and hmtx from the
+#       hmtx transform (woff2_glyf.lucb), each record filled in and padded, and head's
+#       checkSumAdjustment set last. A collection's fonts share tables written once, as the
+#       reference shares them by tag and stream offset.
+#
+#==============================================================================================
+
+# mark: Shared tables ==========================================================================
+
+## The checksums of the tables written so far, by (tag << 32 | stream offset): the
+## reference's map that lets a collection's fonts share a table.
+struct Woff2Checksums:
+    var keys: u64[]
+    var values: u32[]
+    var filled: bool[]
+
+    ## Room for `count` tables.
+    static func open(count: usize) -> Woff2Checksums!:
+        var capacity: usize = 16
+        while capacity < count * 2:
+            capacity *= 2
+        var made = Woff2Checksums()
+        made.keys = try new u64[capacity]
+        errdefer free(made.keys)
+        made.values = try new u32[capacity]
+        errdefer free(made.values)
+        made.filled = try new bool[capacity]
+        return made
+
+    ## The slot of `key`: where it is, or the empty one where it would go.
+    func slot(key: u64) -> usize:
+        let mask = self.keys.length - 1
+        var at = (usize)((key *% 0x9E3779B97F4A7C15) >> 32) & mask
+        while self.filled[at] and self.keys[at] != key:
+            at = (at + 1) & mask
+        return at
+
+    ## The checksum of the table `key`, when it was written.
+    func find(key: u64) -> u32?:
+        let at = self.slot(key)
+        if not self.filled[at]:
+            return none
+        return self.values[at]
+
+    ## Record the checksum of the table `key`.
+    func insert(key: u64, value: u32):
+        let at = self.slot(key)
+        self.keys[at] = key
+        self.values[at] = value
+        self.filled[at] = true
+
+    ## Free the storage.
+    func release():
+        free(self.keys)
+        free(self.values)
+        free(self.filled)
+
+# mark: Rebuilding a font =========================================================================
+
+## FindTable: the index (in the directory) of `font`'s first table `tag`.
+func woff2_find_table(header: const Woff2Header*, font: const Woff2Font*, tag: u32) -> usize?:
+    for position in 0..<font.tables.length:
+        if header.tables[(usize)font.tables[position]].tag == tag:
+            return (usize)font.tables[position]
+    return none
+
+## ReconstructFont: the tables of font `font_index`, from the decoded `stream`, written
+## after what `out` holds, with their records and head's checkSumAdjustment.
+func woff2_reconstruct_font(stream: u8[], header: Woff2Header*, font_index: usize, checksums: Woff2Checksums*, out: Woff2Out*) -> !:
+    let font = &header.fonts[font_index]
+    var dest_offset = out.size
+
+    # glyf without loca makes no sense, nor does transforming only one of them.
+    let glyf_index = woff2_find_table(header, font, woff2_tag_glyf)
+    let loca_index = woff2_find_table(header, font, woff2_tag_loca)
+    if (glyf_index != none) != (loca_index != none):
+        error(invalid_font, "A WOFF2 font with only one of glyf and loca")
+    if let glyf_at = glyf_index:
+        let loca_at = loca_index else error(invalid_font, "A WOFF2 font without loca")
+        if (header.tables[glyf_at].flags & woff2_flag_transform) != (header.tables[loca_at].flags & woff2_flag_transform):
+            error(invalid_font, "A WOFF2 font transforms only one of glyf and loca")
+
+    var font_checksum = font.header_checksum
+    var loca_checksum: u32 = 0
+    for position in 0..<font.tables.length:
+        let table = &header.tables[(usize)font.tables[position]]
+        let key = ((u64)table.tag << 32) | (u64)table.src_offset
+        let previous = checksums.find(key)
+        if font_index == 0 and previous != none:
+            error(invalid_font, "A WOFF2 font lists a table twice")
+        let start = (usize)table.src_offset
+        if (u64)table.src_offset + (u64)table.src_length > (u64)stream.length:
+            error(invalid_font, "A WOFF2 table past the decoded stream")
+        let source = stream[start..<start + (usize)table.src_length]
+
+        if table.tag == woff2_tag_hhea:
+            # numberOfHMetrics, which the hmtx transform needs.
+            if source.length < 36:
+                error(invalid_font, "Truncated WOFF2 hhea table")
+            font.num_hmetrics = sfnt_u16(source, 34)
+
+        var checksum: u32 = 0
+        if let reused = previous:
+            checksum = reused
+        else:
+            if (table.flags & woff2_flag_transform) == 0:
+                if table.tag == woff2_tag_head:
+                    if source.length < 12:
+                        error(invalid_font, "Truncated WOFF2 head table")
+                    # checkSumAdjustment is 0 until the whole font is summed.
+                    woff_put_u32(source, 8, 0)
+                table.dst_offset = (u32)dest_offset
+                checksum = woff2_checksum(source)
+                try out.write(source)
+            elif table.tag == woff2_tag_glyf:
+                table.dst_offset = (u32)dest_offset
+                let loca_at = loca_index else error(invalid_font, "A WOFF2 font without loca")
+                checksum = try woff2_reconstruct_glyf(source, table, &header.tables[loca_at], font, out, &loca_checksum)
+            elif table.tag == woff2_tag_loca:
+                # Written with glyf, whose rebuild knows its checksum.
+                checksum = loca_checksum
+            elif table.tag == woff2_tag_hmtx:
+                table.dst_offset = (u32)dest_offset
+                checksum = try woff2_reconstruct_hmtx(source, font, out)
+            else:
+                error(invalid_font, "An unknown WOFF2 table transform")
+            checksums.insert(key, checksum)
+        font_checksum +%= checksum
+
+        # The table's record, now that its place is known.
+        var record: u8[12]
+        woff_put_u32(record, 0, checksum)
+        woff_put_u32(record, 4, table.dst_offset)
+        woff_put_u32(record, 8, table.dst_length)
+        try out.write_at(try woff2_record_offset(font, table.tag) + 4, record)
+        font_checksum +%= woff2_checksum(record)
+        try out.pad4()
+        if (u64)(table.dst_offset +% table.dst_length) > (u64)out.size:
+            error(invalid_font, "A WOFF2 table longer than its data")
+        dest_offset = out.size
+
+    # head's checkSumAdjustment makes the font sum to 0xB1B0AFBA.
+    if let head_at = woff2_find_table(header, font, woff2_tag_head):
+        let head = &header.tables[head_at]
+        if head.dst_length < 12:
+            error(invalid_font, "Truncated WOFF2 head table")
+        var adjustment: u8[4]
+        woff_put_u32(adjustment, 0, 0xB1B0AFBA -% font_checksum)
+        try out.write_at((usize)head.dst_offset + 8, adjustment)
+
+# mark: Converting a file ==========================================================================
+
+## Woff2Uncompress: the Brotli stream `compressed` decoded into exactly `output`. Bytes
+## after the stream's end are ignored, as BrotliDecoderDecompress ignores them.
+func woff2_uncompress(compressed: const u8[], output: u8[]) -> !:
+    var decoder = brotli.Decoder.open((u64)output.length)
+    defer decoder.close()
+    let step = decoder.step(compressed, output, true) catch:
+        error(invalid_font, "Invalid WOFF2 Brotli stream")
+    if step.status != brotli.finished or (usize)step.produced != output.length:
+        error(invalid_font, "The WOFF2 Brotli stream does not fill its tables")
+
+## The sfnt font (or collection) that the WOFF2 file `buffer` wraps, allocated in the
+## current allocator (free it there): the bytes Google's woff2 decoder produces. Fails with
+## invalid_font for a malformed file, or one that decodes to more than woff2_max_sfnt_size.
+pub func woff2_to_sfnt(buffer: const u8[]) -> u8[]!:
+    var header = Woff2Header()
+    defer header.release()
+    try woff2_read_header(buffer, &header)
+    var out = Woff2Out()
+    defer out.release()
+    try woff2_write_headers(&header, &out)
+
+    # Over 14k test fonts the reference saw ratios to about 20; more than 100 is a lie.
+    if (f32)header.uncompressed_size / (f32)buffer.length > 100.0:
+        error(invalid_font, "Implausible WOFF2 compression ratio")
+    if header.uncompressed_size < 1:
+        error(invalid_font, "Empty WOFF2 table data")
+    if (usize)header.uncompressed_size > woff2_max_sfnt_size:
+        error(invalid_font, "The WOFF2 font decodes to more than 128 MiB")
+    let stream = try new u8[(usize)header.uncompressed_size] ---
+    defer free(stream)
+    let compressed = buffer[header.compressed_offset..<header.compressed_offset + (usize)header.compressed_length]
+    try woff2_uncompress(compressed, stream)
+
+    var references: usize = 0
+    for index in 0..<header.fonts.length:
+        references += header.fonts[index].tables.length
+    var checksums = try Woff2Checksums.open(references)
+    defer checksums.release()
+    for index in 0..<header.fonts.length:
+        try woff2_reconstruct_font(stream, &header, index, &checksums, &out)
+    return try out.take()

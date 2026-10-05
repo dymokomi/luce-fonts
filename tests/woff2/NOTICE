@@ -1,0 +1,14 @@
+WOFF2 files for src/opentype/tests_woff2.lucb, made from the fonts of ../fonts (see their
+NOTICE for licences: SIL Open Font License 1.1 for Lato Bold and Noto Sans Tifinagh, the
+BSD 2-Clause License in LICENSE-luce-browser for SerenitySans), and the sfnt files Google's
+woff2 reference decoder (github.com/google/woff2, woff2_decompress) makes of them:
+
+Lato-Bold.woff2                  woff2_compress of ../fonts/Lato-Bold.ttf
+NotoSansTifinagh-Regular.woff2   woff2_compress of ../fonts/NotoSansTifinagh-Regular.otf
+SerenitySans-Transformed.woff2   fontTools' WOFF2 encoder (glyf, loca and hmtx transformed)
+                                 of SerenitySans-Regular.ttf with each left side bearing set
+                                 to its glyph's xMin and OVERLAP_SIMPLE on every other simple
+                                 glyph
+SerenitySans-Collection.woff2    woff2_compress of a TrueType collection of that font and a
+                                 copy named CollectedSans, sharing their identical tables
+*.sfnt                           woff2_decompress of each

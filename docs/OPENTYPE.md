@@ -49,8 +49,16 @@ opentype.sfnt_face_destroy(face)                         # the bytes stay the ca
   cache has it (phantom points rounded to whole pixels), `sfnt_face_measure_ascii` and
   `sfnt_face_bounds`.
 - **Web fonts** (`woff.lucb`): `woff_to_sfnt(bytes)` unwraps a WOFF file (zlib tables
-  through luce-compress) with Ladybird's checks; `woff2_to_sfnt` fails for now, as there is
-  no Luce Brotli decoder.
+  through luce-compress) with Ladybird's checks.
+- **WOFF2** (`woff2.lucb`, `woff2_glyf.lucb`, `woff2_rebuild.lucb`): `woff2_to_sfnt(bytes)`
+  decodes a WOFF 2.0 file as Google's woff2 reference decoder does (the library behind
+  Ladybird's `WOFF2::convert_to_ttf`), byte for byte: the header and table directory
+  (known tags, UIntBase128 and 255UInt16 numbers), collections, the Brotli stream (luce-compress's
+  `brotli`), the glyf/loca transform (seven streams, composites, the overlap bitmap, the bbox
+  stream, instructions, either loca format) and the hmtx transform, with table checksums and
+  head's checkSumAdjustment. It accepts and refuses what the reference does, bounded by the
+  reference's compression-ratio check and woff2_decompress's 128 MiB output limit
+  (`woff2_max_sfnt_size`).
 - `List[T]` (`list.lucb`) is the growable array the two modules build outlines and glyph
   runs in; it keeps the allocator it first grew in, so a list made under an arena or a
   collected heap stays there.
@@ -106,6 +114,11 @@ these modules: a font of `p` points is `p × 96 / 72` pixels, and shaped glyphs 
 from a baseline at (3.5, 20.25) as `Gfx::shape_text` lays them out. The oracle's text-blob
 bounds and glyph intercept cases test Ladybird's GlyphRun and stay in luce-browser-render.
 `tests_units.lucb` ports Ladybird's TestWOFF and TestWOFF2 and checks the readers' helpers.
+`tests_woff2.lucb` decodes the files of `tests/woff2` and compares them byte for byte with
+the sfnt Google's woff2_decompress made of each (a TrueType font with composites and
+instructions, a CFF font, the hmtx transform with overlap bits, and a collection sharing its
+glyf), checks the decoded Lato Bold glyph by glyph against the original, and decodes
+mutated files, which must fail or decode but never trap.
 The test fonts are in `tests/fonts` with their licences (`NOTICE`).
 
 ## Licences

@@ -1,10 +1,10 @@
 #prisma 4.0
 def package "luce-fonts" {
     str owner = "dymokomi"
-    str version = "0.5.0"
+    str version = "0.6.0"
     str kind = "package"
     str language = "luce-base"
-    str description = "Fonts for Luce: native installed faces and paragraph type (CoreText, GDI, cairo) and a portable OpenType engine: sfnt/CFF/WOFF files, FreeType-exact metrics and outlines, HarfBuzz-style shaping."
+    str description = "Fonts for Luce: native installed faces and paragraph type (CoreText, GDI, cairo) and a portable OpenType engine: sfnt/CFF/WOFF/WOFF2 files, FreeType-exact metrics and outlines, HarfBuzz-style shaping."
     str readme = "README.md"
     str[] public = ["fonts", "opentype", "shaping"]
 
@@ -16,7 +16,7 @@ def package "luce-fonts" {
 
     def dependency "luce-compress" {
         str owner = "dymokomi"
-        str version = "^0.6.0"
+        str version = "^0.7.0"
         str path = "../luce-compress"
     }
 

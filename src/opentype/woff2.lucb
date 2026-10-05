@@ -1,0 +1,525 @@
+#==============================================================================================
+#
+#   woff2 - WOFF2: the header, the table directory, the Brotli stream and the sfnt rebuild
+#
+#   DESCRIPTION:
+#       The W3C WOFF File Format 2.0 (https://www.w3.org/TR/WOFF2/), decoded as Google's
+#       woff2 reference decoder decodes it (woff2_dec.cc, which Ladybird's
+#       WOFF2::convert_to_ttf calls), check for check and byte for byte: the 48-byte
+#       header, the table directory (known-tag indices, UIntBase128 lengths, transform
+#       versions), the collection directory of a TTC (255UInt16 counts and indices), one
+#       Brotli stream (luce-compress's brotli module) holding every table, and the sfnt
+#       rebuilt behind a sorted table directory with its checksums and head's
+#       checkSumAdjustment. The glyf/loca and hmtx transforms are woff2_glyf.lucb's.
+#
+#       Where the reference is lenient the decoder is too (it ignores the reserved field,
+#       totalSfntSize and the major and minor versions, and treats glyf transform versions
+#       1 and 2 as untransformed), so a font decodes here exactly when it decodes in a
+#       browser. The output is bounded: the uncompressed stream by the reference's ratio
+#       of 100 to the file and the sfnt by woff2_decompress's 128 MiB.
+#
+#==============================================================================================
+
+# mark: Limits and tags ========================================================================
+
+## The largest sfnt a WOFF2 file may decode to: 128 MiB, woff2_decompress's bound
+## (woff2::kDefaultMaxSize). A larger font fails with invalid_font.
+pub let woff2_max_sfnt_size: usize = 134217728
+
+# The WOFF2 header's size, and the sfnt offset table and table record it rebuilds.
+let woff2_header_size: usize = 48
+let woff2_offset_table_size: usize = 12
+let woff2_record_size: usize = 16
+
+# The tags the decoder treats specially, and the collection flavor 'ttcf'.
+let woff2_tag_glyf: u32 = 0x676c7966
+let woff2_tag_loca: u32 = 0x6c6f6361
+let woff2_tag_head: u32 = 0x68656164
+let woff2_tag_hhea: u32 = 0x68686561
+let woff2_tag_hmtx: u32 = 0x686d7478
+let woff2_ttc_flavor: u32 = 0x74746366
+
+# A table's flags: the transform version in the low bits and this bit when the table is
+# transformed (kWoff2FlagsTransform).
+let woff2_flag_transform: u32 = 0x100
+
+# The 63 tags a directory entry names by index (table_tags.cc's kKnownTags): cmap, head,
+# hhea, hmtx, maxp, name, OS/2, post, cvt, fpgm, glyf, loca, prep, CFF, VORG, EBDT, EBLC,
+# gasp, hdmx, kern, LTSH, PCLT, VDMX, vhea, vmtx, BASE, GDEF, GPOS, GSUB, EBSC, JSTF, MATH,
+# CBDT, CBLC, COLR, CPAL, SVG, sbix, acnt, avar, bdat, bloc, bsln, cvar, fdsc, feat, fmtx,
+# fvar, gvar, hsty, just, lcar, mort, morx, opbd, prop, trak, Zapf, Silf, Glat, Gloc, Feat
+# and Sill. Index 63 means an explicit tag follows.
+let woff2_known_tags: u32[63] = [
+    0x636d6170, 0x68656164, 0x68686561, 0x686d7478, 0x6d617870, 0x6e616d65, 0x4f532f32, 0x706f7374,
+    0x63767420, 0x6670676d, 0x676c7966, 0x6c6f6361, 0x70726570, 0x43464620, 0x564f5247, 0x45424454,
+    0x45424c43, 0x67617370, 0x68646d78, 0x6b65726e, 0x4c545348, 0x50434c54, 0x56444d58, 0x76686561,
+    0x766d7478, 0x42415345, 0x47444546, 0x47504f53, 0x47535542, 0x45425343, 0x4a535446, 0x4d415448,
+    0x43424454, 0x43424c43, 0x434f4c52, 0x4350414c, 0x53564720, 0x73626978, 0x61636e74, 0x61766172,
+    0x62646174, 0x626c6f63, 0x62736c6e, 0x63766172, 0x66647363, 0x66656174, 0x666d7478, 0x66766172,
+    0x67766172, 0x68737479, 0x6a757374, 0x6c636172, 0x6d6f7274, 0x6d6f7278, 0x6f706264, 0x70726f70,
+    0x7472616b, 0x5a617066, 0x53696c66, 0x476c6174, 0x476c6f63, 0x46656174, 0x53696c6c]
+
+# mark: Reading the file ========================================================================
+
+## A bounds-checked cursor over WOFF2 data (the reference's Buffer): a read past the end
+## fails with invalid_font instead of answering 0.
+struct Woff2Reader:
+    var data: const u8[]
+    var at: usize
+
+    ## The bytes not read yet.
+    func remaining() -> usize:
+        return self.data.length - self.at
+
+    ## The next `count` bytes.
+    func read_bytes(count: usize) -> const u8[]!:
+        if count > self.remaining():
+            error(invalid_font, "Truncated WOFF2 data")
+        let bytes = self.data[self.at..<self.at + count]
+        self.at += count
+        return bytes
+
+    ## Step over `count` bytes.
+    func skip(count: usize) -> !:
+        _ = try self.read_bytes(count)
+
+    func read_u8() -> u8!:
+        let bytes = try self.read_bytes(1)
+        return bytes[0]
+
+    func read_u16() -> u16!:
+        let bytes = try self.read_bytes(2)
+        return sfnt_u16(bytes, 0)
+
+    func read_u32() -> u32!:
+        let bytes = try self.read_bytes(4)
+        return sfnt_u32(bytes, 0)
+
+    ## A 255UInt16 (Read255UShort): a byte below 253, or 253 and a u16, or 255 or 254 and a
+    ## byte to add to 253 or 506.
+    func read_255_u16() -> u32!:
+        let code = try self.read_u8()
+        if code == 253:
+            return (u32)(try self.read_u16())
+        if code == 255:
+            return (u32)(try self.read_u8()) + 253
+        if code == 254:
+            return (u32)(try self.read_u8()) + 506
+        return (u32)code
+
+    ## A UIntBase128 (ReadBase128): at most five bytes of seven bits, most significant
+    ## first, with no leading zero byte and no overflow past 32 bits.
+    func read_base128() -> u32!:
+        var result: u32 = 0
+        for index in 0..<5:
+            let code = try self.read_u8()
+            if index == 0 and code == 0x80:
+                error(invalid_font, "UIntBase128 with a leading zero")
+            if (result & 0xFE000000) != 0:
+                error(invalid_font, "UIntBase128 overflows 32 bits")
+            result = (result << 7) | (u32)(code & 0x7F)
+            if (code & 0x80) == 0:
+                return result
+        error(invalid_font, "UIntBase128 longer than five bytes")
+
+## Round4: `value` rounded up to a multiple of four.
+func woff2_round4(value: u64) -> u64:
+    return (value + 3) & ~(u64)3
+
+## ComputeULongSum: the sfnt checksum of `data`, as if padded with zeros to four bytes.
+func woff2_checksum(data: const u8[]) -> u32:
+    var sum: u32 = 0
+    let aligned = data.length & ~(usize)3
+    var at: usize = 0
+    while at < aligned:
+        sum +%= sfnt_u32(data, at)
+        at += 4
+    if aligned != data.length:
+        var tail: u32 = 0
+        for index in aligned..<data.length:
+            tail |= (u32)data[index] << (u32)(24 - 8 * (index & 3))
+        sum +%= tail
+    return sum
+
+## Sort `keys` ascending (a heapsort: the directories are small, and fuzzed ones are not).
+func woff2_sort(keys: u64[]):
+    var start = keys.length // 2
+    var end = keys.length
+    while end > 1:
+        if start > 0:
+            start -= 1
+        else:
+            end -= 1
+            let top = keys[0]
+            keys[0] = keys[end]
+            keys[end] = top
+        var root = start
+        while 2 * root + 1 < end:
+            var child = 2 * root + 1
+            if child + 1 < end and keys[child] < keys[child + 1]:
+                child += 1
+            if keys[root] >= keys[child]:
+                break
+            let parent = keys[root]
+            keys[root] = keys[child]
+            keys[child] = parent
+            root = child
+
+# mark: The header and directories ===============================================================
+
+## A table of the directory (the reference's Table): its bytes in the decoded stream and
+## its place in the sfnt. A table's stream bytes are its transformLength (its origLength
+## when it is not transformed).
+struct Woff2Table:
+    var tag: u32
+    var flags: u32
+    var src_offset: u32
+    var src_length: u32
+    var dst_offset: u32
+    var dst_length: u32
+
+## One font of the file (the reference's TtcFont and WOFF2FontInfo): a lone font is a
+## collection of one.
+struct Woff2Font:
+    var flavor: u32
+    ## Its offset table in the sfnt, and the checksum of that table and its records.
+    var dst_offset: u32
+    var header_checksum: u32
+    ## Indices of the directory's tables, in the order the font's tables are written.
+    var tables: u32[]
+    ## (tag << 32 | record) sorted: the table record each tag's entry is written to.
+    var slots: u64[]
+    ## What the glyf transform learns and the hmtx transform needs.
+    var num_glyphs: u16
+    var index_format: u16
+    var num_hmetrics: u16
+    var x_mins: List[i16]
+
+## The file's header and directories (the reference's WOFF2Header).
+struct Woff2Header:
+    var flavor: u32
+    ## 0, or a collection's version (0x00010000 or 0x00020000).
+    var header_version: u32
+    var compressed_offset: usize
+    var compressed_length: u32
+    var uncompressed_size: u32
+    var tables: Woff2Table[]
+    var fonts: Woff2Font[]
+
+    ## Free the directories.
+    func release():
+        if self.tables.length > 0:
+            free(self.tables)
+        for index in 0..<self.fonts.length:
+            let font = &self.fonts[index]
+            if font.tables.length > 0:
+                free(font.tables)
+            if font.slots.length > 0:
+                free(font.slots)
+            font.x_mins.release()
+        if self.fonts.length > 0:
+            free(self.fonts)
+
+## ReadTableDirectory: the table directory at `file`, into `tables`.
+func woff2_read_table_directory(file: Woff2Reader*, tables: Woff2Table[]) -> !:
+    var src_offset: u64 = 0
+    for index in 0..<tables.length:
+        let flag_byte = try file.read_u8()
+        var tag: u32 = 0
+        if (flag_byte & 0x3F) == 0x3F:
+            tag = try file.read_u32()
+        else:
+            tag = woff2_known_tags[(usize)(flag_byte & 0x3F)]
+        # Version 0 of glyf and loca is their transform; any other table's is the null one.
+        let version = (u32)((flag_byte >> 6) & 3)
+        var flags = version
+        if tag == woff2_tag_glyf or tag == woff2_tag_loca:
+            if version == 0:
+                flags |= woff2_flag_transform
+        elif version != 0:
+            flags |= woff2_flag_transform
+        let dst_length = try file.read_base128()
+        var transform_length = dst_length
+        if (flags & woff2_flag_transform) != 0:
+            transform_length = try file.read_base128()
+            if tag == woff2_tag_loca and transform_length != 0:
+                error(invalid_font, "A transformed WOFF2 loca table has data")
+        if src_offset + (u64)transform_length > 0xFFFFFFFF:
+            error(invalid_font, "WOFF2 tables overflow 32 bits")
+        tables[index] = Woff2Table(tag = tag, flags = flags, src_offset = (u32)src_offset, src_length = transform_length, dst_offset = 0, dst_length = dst_length)
+        src_offset += (u64)transform_length
+
+## The collection directory at `file`: each font's flavor and table indices, whose glyf
+## and loca, when it has them, are consecutive.
+func woff2_read_collection_directory(file: Woff2Reader*, header: Woff2Header*) -> !:
+    header.header_version = try file.read_u32()
+    if header.header_version != 0x00010000 and header.header_version != 0x00020000:
+        error(invalid_font, "Invalid WOFF2 collection version")
+    let num_fonts = try file.read_255_u16()
+    if num_fonts == 0:
+        error(invalid_font, "A WOFF2 collection without fonts")
+    header.fonts = try new Woff2Font[(usize)num_fonts]
+    for index in 0..<header.fonts.length:
+        let font = &header.fonts[index]
+        let num_tables = try file.read_255_u16()
+        if num_tables == 0:
+            error(invalid_font, "A WOFF2 collection font without tables")
+        font.flavor = try file.read_u32()
+        font.tables = try new u32[(usize)num_tables]
+        var glyf_index: u32 = 0
+        var loca_index: u32 = 0
+        for position in 0..<font.tables.length:
+            let table_index = try file.read_255_u16()
+            if (usize)table_index >= header.tables.length:
+                error(invalid_font, "Invalid WOFF2 collection table index")
+            font.tables[position] = table_index
+            let tag = header.tables[(usize)table_index].tag
+            if tag == woff2_tag_loca:
+                loca_index = table_index
+            if tag == woff2_tag_glyf:
+                glyf_index = table_index
+        # The reference's test, which reads index 0 as absent.
+        if glyf_index > 0 or loca_index > 0:
+            if glyf_index > loca_index or loca_index - glyf_index != 1:
+                error(invalid_font, "WOFF2 collection font with non-consecutive glyf and loca")
+
+## ReadWOFF2Header: the header and directories of `data`, into `header`.
+func woff2_read_header(data: const u8[], header: Woff2Header*) -> !:
+    var file = Woff2Reader(data = data, at = 0)
+    if try file.read_u32() != woff2_signature:
+        error(invalid_font, "Invalid WOFF2 signature")
+    header.flavor = try file.read_u32()
+    if (usize)(try file.read_u32()) != data.length:
+        error(invalid_font, "Invalid WOFF2 length")
+    let num_tables = try file.read_u16()
+    if num_tables == 0:
+        error(invalid_font, "Invalid WOFF2 numTables")
+    # reserved and totalSfntSize, which the reference does not believe.
+    try file.skip(6)
+    header.compressed_length = try file.read_u32()
+    # majorVersion and minorVersion.
+    try file.skip(4)
+    let meta_offset = (u64)(try file.read_u32())
+    let meta_length = (u64)(try file.read_u32())
+    try file.skip(4)
+    let length = (u64)data.length
+    if meta_offset != 0 and (meta_offset >= length or length - meta_offset < meta_length):
+        error(invalid_font, "Invalid WOFF2 metadata block")
+    let priv_offset = (u64)(try file.read_u32())
+    let priv_length = (u64)(try file.read_u32())
+    if priv_offset != 0 and (priv_offset >= length or length - priv_offset < priv_length):
+        error(invalid_font, "Invalid WOFF2 private block")
+
+    header.tables = try new Woff2Table[(usize)num_tables]
+    try woff2_read_table_directory(&file, header.tables)
+    # The tables follow one another, so the last one ends the stream.
+    let last = header.tables[header.tables.length - 1]
+    header.uncompressed_size = last.src_offset + last.src_length
+
+    if header.flavor == woff2_ttc_flavor:
+        try woff2_read_collection_directory(&file, header)
+    else:
+        header.fonts = try new Woff2Font[1]
+        let font = &header.fonts[0]
+        font.flavor = header.flavor
+        font.tables = try new u32[header.tables.length]
+        for index in 0..<font.tables.length:
+            font.tables[index] = (u32)index
+
+    # The compressed stream, then the metadata and private blocks, each 4-byte aligned,
+    # and nothing else.
+    header.compressed_offset = file.at
+    if (u64)file.at > 0xFFFFFFFF:
+        error(invalid_font, "Invalid WOFF2 directory size")
+    var src_offset = woff2_round4((u64)file.at + (u64)header.compressed_length)
+    if src_offset > length:
+        error(invalid_font, "Truncated WOFF2 compressed data")
+    if meta_offset != 0:
+        if src_offset != meta_offset:
+            error(invalid_font, "Misplaced WOFF2 metadata block")
+        src_offset = woff2_round4(meta_offset + meta_length)
+        if src_offset > 0xFFFFFFFF:
+            error(invalid_font, "Invalid WOFF2 metadata block")
+    if priv_offset != 0:
+        if src_offset != priv_offset:
+            error(invalid_font, "Misplaced WOFF2 private block")
+        src_offset = woff2_round4(priv_offset + priv_length)
+        if src_offset > 0xFFFFFFFF:
+            error(invalid_font, "Invalid WOFF2 private block")
+    if src_offset != woff2_round4(length):
+        error(invalid_font, "Extraneous data in the WOFF2 file")
+
+# mark: The sfnt being written ===================================================================
+
+## The sfnt as it is written (the reference's WOFF2Out): it grows in the current allocator
+## up to woff2_max_sfnt_size, and writing past its end extends it with zeros.
+struct Woff2Out:
+    var data: u8[]
+    var size: usize
+
+    ## Room for `capacity` bytes.
+    func reserve(capacity: usize) -> !:
+        if capacity <= self.data.length:
+            return
+        if capacity > woff2_max_sfnt_size:
+            error(invalid_font, "The WOFF2 font decodes to more than 128 MiB")
+        var larger = 4096 if self.data.length < 2048 else self.data.length * 2
+        if larger < capacity:
+            larger = capacity
+        if larger > woff2_max_sfnt_size:
+            larger = woff2_max_sfnt_size
+        let grown = try new u8[larger] ---
+        if self.size > 0:
+            memory.copy(grown, self.data, self.size)
+        if self.data.length > 0:
+            free(self.data)
+        self.data = grown
+
+    ## `count` zero bytes appended, as a span to fill (valid until the sfnt grows).
+    func grow(count: usize) -> u8[]!:
+        if count > woff2_max_sfnt_size - self.size:
+            error(invalid_font, "The WOFF2 font decodes to more than 128 MiB")
+        try self.reserve(self.size + count)
+        let start = self.size
+        self.size += count
+        memory.set(self.data[start..<self.size], 0)
+        return self.data[start..<self.size]
+
+    ## Append `bytes`.
+    func write(bytes: const u8[]) -> !:
+        let span = try self.grow(bytes.length)
+        memory.copy(span, bytes, bytes.length)
+
+    ## Write `bytes` at `offset`, extending the sfnt with zeros when it ends before them.
+    func write_at(offset: usize, bytes: const u8[]) -> !:
+        if offset > woff2_max_sfnt_size or bytes.length > woff2_max_sfnt_size - offset:
+            error(invalid_font, "The WOFF2 font decodes to more than 128 MiB")
+        if offset + bytes.length > self.size:
+            _ = try self.grow(offset + bytes.length - self.size)
+        memory.copy(self.data[offset..], bytes, bytes.length)
+
+    ## Pad4: zeros up to a multiple of four bytes.
+    func pad4() -> !:
+        _ = try self.grow((usize)(woff2_round4((u64)self.size) - (u64)self.size))
+
+    ## The sfnt in a buffer of its size, in the current allocator.
+    func take() -> u8[]!:
+        let result = try new u8[self.size] ---
+        memory.copy(result, self.data, self.size)
+        return result
+
+    ## Free the storage.
+    func release():
+        if self.data.length > 0:
+            free(self.data)
+        var empty: u8[]
+        self.data = empty
+        self.size = 0
+
+## StoreOffsetTable: an sfnt offset table of `num_tables` tables at `offset` of `data`.
+func woff2_store_offset_table(data: u8[], offset: usize, flavor: u32, num_tables: u32):
+    var max_pow2: u32 = 0
+    while ((u32)1 << (max_pow2 + 1)) <= num_tables:
+        max_pow2 += 1
+    let search_range = ((u32)1 << max_pow2) << 4
+    woff_put_u32(data, offset, flavor)
+    woff_put_u16(data, offset + 4, (u16)num_tables)
+    woff_put_u16(data, offset + 6, (u16)search_range)
+    woff_put_u16(data, offset + 8, (u16)max_pow2)
+    woff_put_u16(data, offset + 10, (u16)((num_tables << 4) -% search_range))
+
+## The records of `font`'s offset table get tags in the order of `record_tags`, and each
+## tag's entry goes to the last record of that tag (the reference's map, last write wins).
+func woff2_assign_slots(font: Woff2Font*, record_tags: const u64[]) -> !:
+    font.slots = try new u64[record_tags.length] ---
+    for record in 0..<record_tags.length:
+        font.slots[record] = (record_tags[record] << 32) | (u64)record
+    woff2_sort(font.slots)
+
+## The offset of the table record `tag`'s entry is written to in `font`'s offset table.
+func woff2_record_offset(font: const Woff2Font*, tag: u32) -> usize!:
+    var low: usize = 0
+    var high = font.slots.length
+    while low < high:
+        let middle = (low + high) // 2
+        if (u32)(font.slots[middle] >> 32) <= tag:
+            low = middle + 1
+        else:
+            high = middle
+    if low == 0 or (u32)(font.slots[low - 1] >> 32) != tag:
+        error(invalid_font, "A WOFF2 table without a table record")
+    return (usize)font.dst_offset + woff2_offset_table_size + woff2_record_size * (usize)(font.slots[low - 1] & 0xFFFFFFFF)
+
+## A collection font's tables sorted by tag, as the reference sorts them through a map
+## from tag to index: one index per tag (the last listed), in front of the indices that
+## follow unchanged.
+func woff2_sort_collection_font(header: const Woff2Header*, font: Woff2Font*) -> !:
+    let keys = try new u64[font.tables.length] ---
+    defer free(keys)
+    for position in 0..<font.tables.length:
+        keys[position] = ((u64)header.tables[(usize)font.tables[position]].tag << 32) | (u64)position
+    woff2_sort(keys)
+    let sorted = try new u32[font.tables.length] ---
+    defer free(sorted)
+    var unique: usize = 0
+    for index in 0..<keys.length:
+        if index + 1 == keys.length or (keys[index] >> 32) != (keys[index + 1] >> 32):
+            sorted[unique] = font.tables[(usize)(keys[index] & 0xFFFFFFFF)]
+            unique += 1
+    memory.copy(font.tables, sorted, unique)
+
+## WriteHeaders: the collection header and each font's offset table and table records,
+## zero but for the tags, which the rebuild fills in.
+func woff2_write_headers(header: Woff2Header*, out: Woff2Out*) -> !:
+    var size = woff2_offset_table_size + woff2_record_size * header.tables.length
+    if header.header_version != 0:
+        size = 12 + 4 * header.fonts.length
+        if header.header_version == 0x00020000:
+            size += 12
+        for index in 0..<header.fonts.length:
+            size += woff2_offset_table_size + woff2_record_size * header.fonts[index].tables.length
+    let output = try out.grow(size)
+
+    if header.header_version == 0:
+        # A lone font: the records in tag order, the tables written in directory order.
+        let font = &header.fonts[0]
+        let keys = try new u64[header.tables.length] ---
+        defer free(keys)
+        for index in 0..<keys.length:
+            keys[index] = ((u64)header.tables[index].tag << 32) | (u64)index
+        woff2_sort(keys)
+        for record in 0..<keys.length:
+            keys[record] >>= 32
+            woff_put_u32(output, woff2_offset_table_size + woff2_record_size * record, (u32)keys[record])
+        woff2_store_offset_table(output, 0, header.flavor, (u32)header.tables.length)
+        try woff2_assign_slots(font, keys)
+        font.header_checksum = woff2_checksum(output)
+        return
+
+    # The TTC header, then each font's offset table and records.
+    woff_put_u32(output, 0, header.flavor)
+    woff_put_u32(output, 4, header.header_version)
+    woff_put_u32(output, 8, (u32)header.fonts.length)
+    var offset = 12 + 4 * header.fonts.length
+    if header.header_version == 0x00020000:
+        offset += 12
+    var most: usize = 0
+    for index in 0..<header.fonts.length:
+        if header.fonts[index].tables.length > most:
+            most = header.fonts[index].tables.length
+    let tags = try new u64[most] ---
+    defer free(tags)
+    for index in 0..<header.fonts.length:
+        let font = &header.fonts[index]
+        try woff2_sort_collection_font(header, font)
+        woff_put_u32(output, 12 + 4 * index, (u32)offset)
+        font.dst_offset = (u32)offset
+        woff2_store_offset_table(output, offset, font.flavor, (u32)font.tables.length)
+        offset += woff2_offset_table_size
+        for record in 0..<font.tables.length:
+            let tag = header.tables[(usize)font.tables[record]].tag
+            tags[record] = (u64)tag
+            woff_put_u32(output, offset, tag)
+            offset += woff2_record_size
+        try woff2_assign_slots(font, tags[..<font.tables.length])
+        font.header_checksum = woff2_checksum(output[(usize)font.dst_offset..<offset])

@@ -1,6 +1,6 @@
 #==============================================================================================
 #
-#   woff - WOFF and WOFF2: unwrapping a web font into the sfnt font it carries
+#   woff - WOFF: unwrapping a web font into the sfnt font it carries
 #
 #   DESCRIPTION:
 #       WOFF 1.0 as Ladybird's loader reads it (Libraries/LibGfx/Font/WOFF/Loader.cpp, with
@@ -9,8 +9,7 @@
 #       the declared total size, behind a rebuilt table directory. A zlib stream that does
 #       not fill its table exactly fails, like the donor's size check.
 #
-#       WOFF2 needs a Brotli decoder (Google's woff2 library in Ladybird), which the Luce
-#       ecosystem does not have yet: woff2_to_sfnt fails.
+#       WOFF2 is woff2.lucb's, woff2_rebuild.lucb's and woff2_glyf.lucb's.
 #
 #==============================================================================================
 
@@ -155,13 +154,6 @@ pub func woff_to_sfnt(buffer: const u8[]) -> u8[]!:
     if (usize)total_sfnt_size != expected_total_sfnt_size:
         error(invalid_font, "Invalid WOFF total sfnt size")
     return font_buffer
-
-## The sfnt font that the WOFF2 file `buffer` wraps. FIXME: WOFF2 tables are Brotli-compressed
-## and there is no Luce Brotli decoder yet, so this always fails (after the signature check).
-pub func woff2_to_sfnt(buffer: const u8[]) -> u8[]!:
-    if sfnt_u32(buffer, 0) != woff2_signature:
-        error(invalid_font, "Invalid WOFF2 signature")
-    error(invalid_font, "Failed to convert the WOFF2 font to TTF")
 
 ## Whether `buffer` starts with the signature of a WOFF or WOFF2 file.
 pub func woff_is_web_font(buffer: const u8[]) -> bool:
