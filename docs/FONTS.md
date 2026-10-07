@@ -47,9 +47,9 @@ The UI raster cache avoids repeating native font work for unchanged runs. Upload
 currently belong to each frame; a persistent GPU atlas is a future optimization,
 not an application resource-management requirement.
 
-`tests/programs/fonts/run.py` checks metrics, transparent blank glyphs, intermediate
-alpha, multiple backing scales, limits, frame expiry and foreign-symbol isolation
-in all native optimization levels and both C comparison modes. UI pixel tests
+The test program `tests/native_fonts` checks metrics, transparent blank glyphs,
+intermediate alpha, multiple backing scales, limits and frame expiry, and
+`tests/font_boundaries` foreign-symbol isolation in each target's assembly. UI pixel tests
 read back real Metal rendering, including known transparent/partial/opaque masks.
 The Vulkan declarations are checked against the Khronos header ABI on Windows;
 Windows font behavior runs on the Windows CI host. A Windows Vulkan device is

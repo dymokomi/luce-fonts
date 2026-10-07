@@ -1,17 +1,17 @@
 #prisma 4.0
-def package "fonts-test" {
+def package "native-fonts-test" {
     def dependency "luce-fonts" {
         str owner = "dymokomi"
-        str path = "../../.."
+        str path = "../.."
     }
 
     def dependency "luce-gpu" {
         str owner = "dymokomi"
-        str path = "../../../../luce-gpu"
+        str path = "../../../luce-gpu"
     }
 
     def dependency "luce-window" {
         str owner = "dymokomi"
-        str path = "../../../../luce-window"
+        str path = "../../../luce-window"
     }
 }

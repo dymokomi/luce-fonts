@@ -1,0 +1,26 @@
+# The native font backends stay behind their platform: tests/native_fonts built for each
+# target as assembly names no other platform's font API.
+from luce_std import files, paths, process
+
+let failed = ErrorCode.package(1)
+
+pub func main(arguments: list[str]) -> int!:
+    let base = process.variable("LUCE_BASE") else "luce-base"
+    let work = "build/tests/font_boundaries"
+    files.ensure_directory(work)
+    let foreign = {"macos": ["CTFontCreateWithName", "CGContextRelease"],
+                   "windows": ["CreateFontIndirectW", "GetGlyphOutlineW"],
+                   "linux": ["cairo_create", "cairo_scaled_font_destroy"]}
+    for target in ["arm64-macos", "x86_64-windows", "x86_64-linux"]:
+        let output = paths.join(work, f"{target}.s")
+        let built = process.run(base, ["build", "tests/native_fonts/main.lucb", "--target", target, "--emit=asm", "-o", output])
+        if built.exit_code != 0:
+            error(failed, f"{target}: the build failed\n{built.output}{built.error_output}")
+        let assembly = files.read_text(output, 1073741824)
+        for (platform, symbols) in foreign:
+            if target.ends_with(platform):
+                continue
+            for symbol in symbols:
+                if symbol in assembly:
+                    error(failed, f"{target} names {platform}'s {symbol}")
+    return 0
