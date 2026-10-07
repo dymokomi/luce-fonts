@@ -155,6 +155,23 @@ let sfnt_ttcf_tag: u32 = 0x74746366
 ## Parses the font `ttc_index` of `data`: what `SkFontMgr::makeFromStream` does through FreeType's
 ## FT_Open_Face. Fails where FreeType fails to open the face.
 pub func sfnt_face_create(data: const u8[], ttc_index: u32) -> SfntFace*!:
+    let face = try sfnt_face_open_directory(data, ttc_index)
+    errdefer sfnt_face_destroy(face)
+    try sfnt_face_load(face)
+    return face
+
+## The family name of the font `ttc_index` of `data`, as the face sfnt_face_create makes names
+## it, in the current allocator. Reads only the table directory, OS/2 and name, so a font
+## provider can index a directory of fonts by family without loading them.
+pub func sfnt_family_name(data: const u8[], ttc_index: u32) -> str!:
+    let face = try sfnt_face_open_directory(data, ttc_index)
+    defer sfnt_face_destroy(face)
+    sfnt_face_load_os2(face)
+    return sfnt_face_family_name(face)
+
+## A face with only its table directory read: the font `ttc_index` of `data` checked as far as
+## FT_Open_Face checks the directory.
+func sfnt_face_open_directory(data: const u8[], ttc_index: u32) -> SfntFace*!:
     if data.length < 12:
         error(invalid_font, "Font data is too short")
 
@@ -187,7 +204,10 @@ pub func sfnt_face_create(data: const u8[], ttc_index: u32) -> SfntFace*!:
         if length > data.length - offset:
             length = data.length - offset
         face.tables.push(SfntTable(tag = sfnt_u32(data, record), offset = offset, length = length))
+    return face
 
+## Reads the tables of a face whose directory sfnt_face_open_directory read.
+func sfnt_face_load(face: SfntFace*) -> !:
     let head = sfnt_face_table(face, sfnt_tag('h', 'e', 'a', 'd')) else error(invalid_font, "The font has no head table")
     if head.length < 54:
         error(invalid_font, "Truncated head table")
@@ -247,7 +267,6 @@ pub func sfnt_face_create(data: const u8[], ttc_index: u32) -> SfntFace*!:
     # its typeface with whatever is current later.
     if face.outline_format == SfntOutlineFormat.cff:
         _ = sfnt_face_cff_font(face)
-    return face
 
 ## The table `tag` of the face, or none when it has no such table.
 pub func sfnt_face_table(face: const SfntFace*, tag: u32) -> const u8[]?:

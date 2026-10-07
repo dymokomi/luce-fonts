@@ -116,6 +116,21 @@ test "a face that is not a font fails, and a face is destroyed with what it hold
         sfnt_face_destroy(face)
         free(data)
 
+test "a font's family name is read without opening the face":
+    with memory.heap:
+        for path in ["tests/fonts/NotoSansTifinagh-Regular.otf", "tests/fonts/Lato-Bold.ttf", "tests/fonts/SerenitySans-Regular.ttf"]:
+            let data = test_read_file(path)
+            let face = sfnt_face_create(data, 0) else trap("a test font does not open")
+            let name = sfnt_family_name(data, 0) else trap("a test font's family name does not read")
+            assert(name == face.family_name and name.length > 0)
+            free(name.bytes)
+            sfnt_face_destroy(face)
+            free(data)
+    let junk: u8[16] = [0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let failed: str? = sfnt_family_name(junk, 0) catch:
+        recover none
+    assert(failed == none)
+
 test "lists grow, insert, remove and resize":
     var list: List[u32]
     for value in 0..<(u32)20:
