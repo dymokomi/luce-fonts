@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-fonts" {
     str owner = "dymokomi"
-    str version = "0.7.1"
+    str version = "0.7.2"
     str kind = "package"
     str language = "luce-base"
     str description = "Fonts for Luce: native installed faces and paragraph type (CoreText, GDI, cairo) and a portable OpenType engine: sfnt/CFF/WOFF/WOFF2 files, FreeType-exact metrics and outlines, HarfBuzz-style shaping."
